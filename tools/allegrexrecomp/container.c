@@ -1,0 +1,289 @@
+/* allegrexrecomp — container parsing. See container.h. */
+
+#include "container.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+/* Little-endian readers. The PSP is LE and so is every host we build for, but
+ * going through these keeps the parsers honest and endian-independent. */
+static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static uint32_t rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* ---- format sniffing ----------------------------------------------------- */
+
+psp_format psp_sniff(const uint8_t *d, size_t len) {
+    if (len < 16) return FMT_UNKNOWN;
+    if (!memcmp(d, "\x7f" "ELF", 4))  return FMT_ELF;
+    if (!memcmp(d, "~PSP", 4))        return FMT_PSP;
+    if (!memcmp(d, "~SCE", 4))        return FMT_SCE;
+    if (!memcmp(d, "\0PBP", 4))       return FMT_PBP;
+    /* ISO9660: the primary volume descriptor sits at sector 16 with "CD001".
+     * A 16-byte sniff cannot see that, so callers handle ISO separately; we
+     * only report it here when handed a large enough buffer. */
+    if (len > 16 * ISO_SECTOR + 6 &&
+        !memcmp(d + 16 * ISO_SECTOR + 1, "CD001", 5)) return FMT_ISO9660;
+    return FMT_UNKNOWN;
+}
+
+const char *psp_format_name(psp_format f) {
+    switch (f) {
+    case FMT_ISO9660: return "ISO9660 disc image";
+    case FMT_PBP:     return "PBP container";
+    case FMT_PSP:     return "~PSP encrypted PRX";
+    case FMT_SCE:     return "~SCE wrapper";
+    case FMT_ELF:     return "ELF32";
+    default:          return "unknown";
+    }
+}
+
+/* ---- blob ---------------------------------------------------------------- */
+
+int psp_blob_read(const char *path, psp_blob *out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long n = ftell(f);
+    if (n < 0) { fclose(f); return -1; }
+    rewind(f);
+    uint8_t *buf = (uint8_t *)malloc((size_t)n ? (size_t)n : 1);
+    if (!buf) { fclose(f); return -1; }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); fclose(f); return -1; }
+    fclose(f);
+    out->data = buf;
+    out->size = (size_t)n;
+    return 0;
+}
+
+void psp_blob_free(psp_blob *b) {
+    free(b->data);
+    b->data = NULL;
+    b->size = 0;
+}
+
+/* ---- ISO9660 ------------------------------------------------------------- */
+
+/* Recursively walk one directory extent. `count` is both the running total and
+ * the write cursor into `out`; `out` may be NULL to count only. */
+static int iso_walk(FILE *f, uint32_t lba, uint32_t size, const char *prefix,
+                    iso_entry *out, int max_entries, int *count, int depth) {
+    if (depth > 8) return 0;   /* ISO9660 caps at 8; also stops cycles */
+
+    uint32_t nsec = (size + ISO_SECTOR - 1) / ISO_SECTOR;
+    uint8_t *buf = (uint8_t *)malloc((size_t)nsec * ISO_SECTOR);
+    if (!buf) return -1;
+    if (fseek(f, (long)lba * ISO_SECTOR, SEEK_SET) != 0 ||
+        fread(buf, 1, (size_t)nsec * ISO_SECTOR, f) != (size_t)nsec * ISO_SECTOR) {
+        free(buf);
+        return -1;
+    }
+
+    uint32_t off = 0;
+    const uint32_t total = nsec * ISO_SECTOR;
+    while (off < total) {
+        uint8_t rlen = buf[off];
+        if (rlen == 0) {
+            /* Records never straddle a sector; skip the tail padding. */
+            off = (off / ISO_SECTOR + 1) * ISO_SECTOR;
+            continue;
+        }
+        if (off + rlen > total) break;
+
+        const uint8_t *rec = buf + off;
+        uint32_t ext_lba  = rd32(rec + 2);
+        uint32_t ext_size = rd32(rec + 10);
+        uint8_t  flags    = rec[25];
+        uint8_t  namelen  = rec[32];
+        off += rlen;
+
+        /* Skip the "." and ".." self/parent records. */
+        if (namelen == 1 && (rec[33] == 0x00 || rec[33] == 0x01)) continue;
+        if (namelen > 200) continue;
+
+        char name[224];
+        memcpy(name, rec + 33, namelen);
+        name[namelen] = '\0';
+        char *semi = strchr(name, ';');   /* strip the ISO version suffix */
+        if (semi) *semi = '\0';
+
+        char full[256];
+        snprintf(full, sizeof full, "%s/%s", prefix, name);
+
+        int is_dir = (flags & 0x02) != 0;
+        if (out && *count < max_entries) {
+            iso_entry *e = &out[*count];
+            snprintf(e->path, sizeof e->path, "%s", full);
+            e->lba = ext_lba;
+            e->size = ext_size;
+            e->is_dir = is_dir;
+        }
+        (*count)++;
+
+        if (is_dir)
+            iso_walk(f, ext_lba, ext_size, full, out, max_entries, count, depth + 1);
+    }
+
+    free(buf);
+    return 0;
+}
+
+int iso_list(FILE *f, iso_entry *out, int max_entries) {
+    uint8_t pvd[ISO_SECTOR];
+    if (fseek(f, 16 * ISO_SECTOR, SEEK_SET) != 0) return -1;
+    if (fread(pvd, 1, ISO_SECTOR, f) != ISO_SECTOR) return -1;
+    if (memcmp(pvd + 1, "CD001", 5) != 0) return -1;
+
+    /* The root directory record is embedded at offset 156 of the PVD. */
+    uint32_t root_lba  = rd32(pvd + 156 + 2);
+    uint32_t root_size = rd32(pvd + 156 + 10);
+
+    int count = 0;
+    if (iso_walk(f, root_lba, root_size, "", out, max_entries, &count, 0) != 0)
+        return -1;
+    return count;
+}
+
+int iso_extract(FILE *f, const iso_entry *e, const char *dst_path) {
+    if (e->is_dir) return -1;
+    FILE *o = fopen(dst_path, "wb");
+    if (!o) return -1;
+    if (fseek(f, (long)e->lba * ISO_SECTOR, SEEK_SET) != 0) { fclose(o); return -1; }
+
+    uint8_t chunk[64 * 1024];
+    uint32_t left = e->size;
+    while (left) {
+        uint32_t want = left < sizeof chunk ? left : (uint32_t)sizeof chunk;
+        if (fread(chunk, 1, want, f) != want) { fclose(o); return -1; }
+        if (fwrite(chunk, 1, want, o) != want) { fclose(o); return -1; }
+        left -= want;
+    }
+    fclose(o);
+    return 0;
+}
+
+/* ---- PARAM.SFO ----------------------------------------------------------- */
+
+int sfo_dump(const uint8_t *d, size_t len, FILE *out) {
+    if (len < 0x14 || rd32(d) != 0x46535000u /* "\0PSF" */) return -1;
+
+    uint32_t key_off  = rd32(d + 0x08);
+    uint32_t data_off = rd32(d + 0x0C);
+    uint32_t count    = rd32(d + 0x10);
+    if (count > 256) return -1;   /* sanity: real SFOs have a few dozen keys */
+
+    for (uint32_t i = 0; i < count; i++) {
+        size_t e = 0x14 + (size_t)i * 16;
+        if (e + 16 > len) break;
+        uint16_t ko    = rd16(d + e);
+        uint16_t fmt   = rd16(d + e + 2);
+        uint32_t dlen  = rd32(d + e + 4);
+        uint32_t dof   = rd32(d + e + 12);
+
+        if (key_off + ko >= len) break;
+        const char *key = (const char *)(d + key_off + ko);
+
+        if ((size_t)data_off + dof + dlen > len) break;
+        const uint8_t *val = d + data_off + dof;
+
+        if (fmt == 0x0404 && dlen >= 4)
+            fprintf(out, "  %-18s %u\n", key, rd32(val));
+        else
+            fprintf(out, "  %-18s %.*s\n", key, (int)dlen, (const char *)val);
+    }
+    return 0;
+}
+
+/* ---- PBP ----------------------------------------------------------------- */
+
+const char *const PBP_SEGMENT_NAMES[PBP_NUM_SEGMENTS] = {
+    "PARAM.SFO", "ICON0.PNG", "ICON1.PMF", "PIC0.PNG",
+    "PIC1.PNG",  "SND0.AT3",  "DATA.PSP",  "DATA.PSAR"
+};
+
+int pbp_parse(const uint8_t *d, size_t len, pbp_info *out) {
+    if (len < 0x28 || memcmp(d, "\0PBP", 4) != 0) return -1;
+
+    memset(out, 0, sizeof *out);
+    out->version = rd32(d + 4);
+    for (int i = 0; i < PBP_NUM_SEGMENTS; i++)
+        out->offset[i] = rd32(d + 8 + i * 4);
+
+    /* A segment runs to the next segment's offset; the last runs to EOF.
+     * Offsets are non-decreasing, and equal offsets mean an empty segment. */
+    for (int i = 0; i < PBP_NUM_SEGMENTS; i++) {
+        uint32_t end = (i + 1 < PBP_NUM_SEGMENTS) ? out->offset[i + 1] : (uint32_t)len;
+        out->size[i] = (end > out->offset[i]) ? end - out->offset[i] : 0;
+    }
+    return 0;
+}
+
+/* ---- ~PSP header --------------------------------------------------------- */
+
+int psp_header_parse(const uint8_t *d, size_t len, psp_header *out) {
+    if (len < PSP_HEADER_SIZE || memcmp(d, "~PSP", 4) != 0) return -1;
+
+    memset(out, 0, sizeof *out);
+    out->mod_attr  = rd16(d + 0x04);
+    out->comp_attr = rd16(d + 0x06);
+    out->mod_ver_lo = d[0x08];
+    out->mod_ver_hi = d[0x09];
+    memcpy(out->modname, d + 0x0A, 28);
+    out->modname[28] = '\0';
+    out->nsegments      = d[0x27];
+    out->elf_size       = rd32(d + 0x28);
+    out->psp_size       = rd32(d + 0x2C);
+    out->boot_entry     = rd32(d + 0x30);
+    out->modinfo_offset = rd32(d + 0x34);
+    out->bss_size       = rd32(d + 0x38);
+    for (int i = 0; i < 4; i++) {
+        out->seg_address[i] = rd32(d + 0x44 + i * 4);
+        out->seg_size[i]    = rd32(d + 0x54 + i * 4);
+    }
+    out->devkit_version = rd32(d + 0x78);
+    out->decrypt_mode   = d[0x7C];
+    out->tag            = rd32(d + 0x130);
+    return 0;
+}
+
+/* ---- ELF / PRX ----------------------------------------------------------- */
+
+int elf_parse(const uint8_t *d, size_t len, elf_info *out) {
+    if (len < 52 || memcmp(d, "\x7f" "ELF", 4) != 0) return -1;
+    if (d[4] != 1 || d[5] != 1) return -1;   /* ELFCLASS32, ELFDATA2LSB */
+
+    memset(out, 0, sizeof *out);
+    out->type  = rd16(d + 16);
+    out->entry = rd32(d + 24);
+
+    uint32_t phoff     = rd32(d + 28);
+    uint16_t phentsize = rd16(d + 42);
+    uint16_t phnum     = rd16(d + 44);
+    if (phentsize < 32) return -1;
+
+    int n = 0;
+    for (uint16_t i = 0; i < phnum && n < 8; i++) {
+        size_t p = (size_t)phoff + (size_t)i * phentsize;
+        if (p + 32 > len) break;
+        uint32_t p_type = rd32(d + p);
+        if (p_type != 1) continue;           /* PT_LOAD only */
+
+        elf_segment *s = &out->seg[n++];
+        s->offset = rd32(d + p + 4);
+        s->addr   = rd32(d + p + 8);
+        s->filesz = rd32(d + p + 16);
+        s->memsz  = rd32(d + p + 20);
+        s->flags  = rd32(d + p + 24);
+
+        /* First executable (PF_X) segment is the .text we hand to the decoder. */
+        if ((s->flags & 0x1) && out->text_size == 0) {
+            out->text_addr   = s->addr;
+            out->text_offset = s->offset;
+            out->text_size   = s->filesz;
+        }
+    }
+    out->nsegments = n;
+    return 0;
+}
