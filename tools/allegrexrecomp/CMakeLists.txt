@@ -1,11 +1,16 @@
 # allegrexrecomp — the recompiler CLI.
 #
-# Split into a library plus a thin main() so the tests can link the decoder and
-# the container parsers directly without shelling out to the executable.
+# Split into a library plus a thin main() so the tests can link the decoder,
+# the container parsers and the crypto directly without shelling out to the
+# executable.
 
 add_library(allegrex_core STATIC
     decode.c
     container.c
+    keys.c
+    crypto/aes.c
+    crypto/cmac.c
+    crypto/kirk.c
 )
 
 target_include_directories(allegrex_core PUBLIC

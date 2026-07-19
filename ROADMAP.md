@@ -44,27 +44,65 @@ decoder correct enough to trust when you do.
       modules with their per-module key tags.
 - [x] Build system (CMake, zero external dependencies), docs, MIT license.
 
-## Phase 2 — decryption (the gate)
+## Phase 2a — the crypto core and KIRK CMD1 ✅
 
 Every executable module on a retail disc is a `~PSP`-wrapped, KIRK-encrypted
-PRX. `BOOT.BIN` is zeroed. Until this is done, the decoder has nothing real to
-chew on. See [`docs/DECRYPT.md`](docs/DECRYPT.md).
+PRX, and `BOOT.BIN` is zeroed. See [`docs/DECRYPT.md`](docs/DECRYPT.md).
 
-- [ ] **KIRK AES-128 core** — CMD1 (decrypt-and-verify) is the one that matters
-      for game modules; CMD7 for some system PRXs.
-- [ ] **The published per-tag key table** — each module carries a tag at header
-      offset `0x130` selecting a key set. WTF's five game-sharing modules use
-      five different tags, so the table is exercised immediately rather than
-      hard-coded to one case.
-- [ ] **`~PSP` → ELF** — reassemble the decrypted segments into a valid ELF32
-      using the header's segment table, and verify against the header's
-      declared `elf_size`.
-- [ ] **Cross-check**: the decrypted ELF must parse cleanly with the phase-1
-      ELF parser, its entry point must land inside a `PF_X` segment, and
-      `cover` over its `.text` must show a code-shaped opcode histogram
-      (`lw`/`sw`/`addiu`/`nop` dominant) rather than a flat one.
-- [ ] `allegrexrecomp decrypt` subcommand, and `info`/`dis`/`cover` transparently
-      decrypting so the rest of the tool stops caring about the wrapper.
+- [x] **AES-128/192/256** (`crypto/aes.c`) — self-contained, no dependency. The
+      S-box is derived from its algebraic definition rather than transcribed,
+      so it is either completely right or obviously wrong.
+- [x] **AES-CMAC** (`crypto/cmac.c`), RFC 4493.
+- [x] **Validated against the primary standards** before touching a game
+      module: FIPS-197 Appendix C (all three key sizes, plus the inverse
+      cipher), NIST SP 800-38A F.2 (CBC, including in-place operation and a
+      zero IV), RFC 4493 (all four CMAC examples, covering both padding
+      branches). `ctest` target `crypto`.
+- [x] **KIRK CMD1** (`crypto/kirk.c`) — key unwrapping, both CMAC checks, body
+      decryption. Handles nonzero header/body padding and unaligned data
+      lengths, and bounds-checks every size field so a corrupt module cannot
+      read out of bounds.
+- [x] **Verified end to end with synthetic blobs** (`ctest` target `kirk`) —
+      round trip, padding, unaligned lengths, wrong key caught at the *header*
+      CMAC, tampered body caught at the *data* CMAC, and every malformed-input
+      path. No PSP key material is needed for any of it, because CMD1's
+      structure does not depend on which key it is given.
+- [x] **External key loading** (`keys.c`) — `--keys`, `$PSPRECOMP_KEYS`, or
+      `./keys/psp_keys.txt`. No key material is bundled; a missing or
+      wrong-length key produces a named diagnostic.
+- [x] `allegrexrecomp kirk1` (decrypt a raw CMD1 blob) and
+      `allegrexrecomp decrypt` (identify a module and probe it).
+
+## Phase 2b — the `~PSP` tag layer
+
+Above CMD1 sits a per-tag transform that *builds* the CMD1 header.
+
+Established empirically rather than assumed: `decrypt` scans for an embedded
+CMD1 metadata block using a ~100-bit structural signature, and finds none in
+any module on the WTF disc. So the CMD1 header is constructed by the tag layer,
+not sitting in the `~PSP` header at a fixed offset. Guessing that offset would
+have produced silently-wrong output.
+
+Also established: WTF's main executable is **decrypt mode 9** while all five
+game-sharing modules are **mode 10**, so at least two variants are in play.
+
+- [ ] The tag → key-set table, from the external key file.
+- [ ] The mode 9 and mode 10 transforms that build a CMD1 header from a `~PSP`
+      header. Needs the reference algorithm — approximating it would produce
+      plausible garbage that the CMACs would reject without saying which step
+      was wrong.
+- [ ] **`~PSP` → ELF** — reassemble decrypted segments into a valid ELF32 using
+      the header's segment table.
+- [ ] **Cross-check**: output must be exactly `elf_size` bytes, parse with the
+      phase-1 ELF parser, have its entry point land in a `PF_X` segment, and
+      show a code-shaped opcode histogram under `cover` rather than a flat one.
+- [ ] `info`/`dis`/`cover` decrypting transparently, so the rest of the tool
+      stops caring about the wrapper.
+
+**Not on the critical path.** Phase 3 needs *plaintext*, not necessarily *our*
+decryptor — [`pspdecrypt`](https://github.com/John-K/pspdecrypt) (GPL-3.0) run
+as an external process produces it today, exactly like PPSSPP-as-oracle. 2b is
+about being self-contained, which is a goal but not a gate.
 
 ## Phase 3 — function discovery + the C emitter
 

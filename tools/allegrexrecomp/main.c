@@ -12,6 +12,8 @@
 
 #include "container.h"
 #include "decode.h"
+#include "keys.h"
+#include "crypto/kirk.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,9 +30,14 @@ static int usage(void) {
         "  allegrexrecomp extract <file.iso> <substring> <outdir>\n"
         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
         "  allegrexrecomp cover   <file>\n"
+        "  allegrexrecomp decrypt <file> [--keys <path>]\n"
+        "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
         "\n"
         "Accepts .iso disc images, PBP containers, ~PSP / ~SCE wrappers,\n"
-        "ELF/PRX modules, and raw binaries.\n");
+        "ELF/PRX modules, and raw binaries.\n"
+        "\n"
+        "Key material is never bundled. Supply it via --keys, $PSPRECOMP_KEYS,\n"
+        "or ./keys/psp_keys.txt — see docs/DECRYPT.md.\n");
     return 2;
 }
 
@@ -415,6 +422,206 @@ static int cmd_cover(const char *path) {
     return 0;
 }
 
+/* ---- decryption ---------------------------------------------------------- */
+
+static uint32_t rd32le(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Narrow a blob down to the ~PSP module inside it, whatever it is wrapped in.
+ * Returns NULL if there is no ~PSP layer to be found. */
+static const uint8_t *find_psp_module(const uint8_t *d, size_t len, size_t *out_len) {
+    switch (psp_sniff(d, len < 16 ? len : 16)) {
+    case FMT_PSP:
+        *out_len = len;
+        return d;
+    case FMT_SCE:
+        /* ~SCE is a 0x40-byte shim over the real payload. */
+        if (len > 0x40 && psp_sniff(d + 0x40, 16) == FMT_PSP) {
+            *out_len = len - 0x40;
+            return d + 0x40;
+        }
+        return NULL;
+    case FMT_PBP: {
+        pbp_info p;
+        if (pbp_parse(d, len, &p) == 0 && p.size[6] &&
+            p.offset[6] + p.size[6] <= len &&
+            psp_sniff(d + p.offset[6], 16) == FMT_PSP) {
+            *out_len = p.size[6];
+            return d + p.offset[6];
+        }
+        return NULL;
+    }
+    default:
+        return NULL;
+    }
+}
+
+/* Does a 0x30-byte block look like KIRK CMD1 metadata?
+ *
+ * The metadata block is highly constrained — a mode of exactly 1, a signature
+ * flag of 0 or 1, a retail/devkit word that is 0 or all-ones, and 0x18 bytes
+ * of mandatory zeros. That is roughly 100 bits of structure, so a false
+ * positive in a few hundred bytes of header is very unlikely.
+ *
+ * This exists because the transform from a ~PSP header to a CMD1 header is the
+ * one part of the chain we do not yet have a trustworthy description of. Rather
+ * than guess an offset and silently decrypt garbage, we look for the block and
+ * report where it actually is — measuring the layout instead of assuming it.
+ */
+static int looks_like_cmd1_meta(const uint8_t *m, size_t avail, uint32_t file_size) {
+    if (avail < KIRK1_META_SIZE) return 0;
+
+    if (rd32le(m + 0x00) != 1)   return 0;          /* mode */
+    if (rd32le(m + 0x04) > 1)    return 0;          /* 0 = CMAC, 1 = ECDSA */
+    if (rd32le(m + 0x08) != 0)   return 0;          /* reserved */
+
+    uint32_t devkit = rd32le(m + 0x0C);
+    if (devkit != 0 && devkit != 0xFFFFFFFFu) return 0;
+
+    uint32_t data_size = rd32le(m + 0x10);
+    uint32_t pad       = rd32le(m + 0x14);
+    if (data_size == 0 || data_size > file_size) return 0;
+    if (pad > 0x10000u) return 0;
+
+    for (int i = 0x18; i < 0x30; i++) if (m[i]) return 0;
+    return 1;
+}
+
+static int cmd_decrypt(const char *path, const char *keypath) {
+    psp_blob b;
+    if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
+
+    size_t mod_len = 0;
+    const uint8_t *mod = find_psp_module(b.data, b.size, &mod_len);
+    if (!mod) {
+        fprintf(stderr, "no ~PSP module found in %s (format: %s)\n",
+                path, psp_format_name(psp_sniff(b.data, 16)));
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    psp_header h;
+    if (psp_header_parse(mod, mod_len, &h) != 0) {
+        fprintf(stderr, "malformed ~PSP header\n");
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    printf("module:   %s\n", h.modname);
+    printf("tag:      0x%08X   decrypt mode %u\n", h.tag, h.decrypt_mode);
+    printf("sizes:    %u encrypted -> %u decrypted\n", h.psp_size, h.elf_size);
+
+    /* Probe the header for an embedded CMD1 metadata block. */
+    printf("\nprobing for a KIRK CMD1 metadata block...\n");
+    int found = 0;
+    const size_t scan_limit = mod_len < 0x400 ? mod_len : 0x400;
+    for (size_t off = 0; off + KIRK1_META_SIZE <= scan_limit; off += 4) {
+        if (!looks_like_cmd1_meta(mod + off, mod_len - off, (uint32_t)mod_len)) continue;
+
+        /* The metadata sits at +0x60 within a CMD1 header, so the header
+         * itself begins 0x60 earlier. */
+        printf("  found at module offset 0x%zX", off);
+        if (off >= KIRK1_META_OFFSET) {
+            size_t hdr = off - KIRK1_META_OFFSET;
+            printf("  => CMD1 header at 0x%zX\n", hdr);
+            kirk1_info info;
+            if (kirk_cmd1_peek(mod + hdr, mod_len - hdr, &info) == KIRK_OK) {
+                printf("    data size    %u\n", info.data_size);
+                printf("    padding      0x%X\n", info.data_offset);
+                printf("    signature    %s\n", info.use_ecdsa ? "ECDSA" : "AES-CMAC");
+                printf("    target       %s\n", info.is_devkit ? "devkit" : "retail");
+                if (info.data_size == h.elf_size)
+                    printf("    *** data size matches the header's declared ELF size ***\n");
+            }
+        } else {
+            printf("  (too close to the start to hold a full CMD1 header)\n");
+        }
+        found++;
+    }
+    if (!found) printf("  none found in the first 0x%zX bytes\n", scan_limit);
+
+    /* Only attempt an actual decrypt if we have a key to attempt it with. */
+    key_store ks;
+    keys_load(&ks, keypath);
+
+    char err[256];
+    const uint8_t *kirk1 = keys_require(&ks, "kirk1", 16, err, sizeof err);
+    if (!kirk1) {
+        printf("\nno decryption attempted: %s\n", err);
+        printf("See docs/DECRYPT.md for the key file format.\n");
+        psp_blob_free(&b);
+        return found ? 0 : 1;
+    }
+
+    printf("\nkeys loaded from %s\n", ks.path);
+    printf("(the ~PSP tag -> CMD1 transform is not implemented yet; see\n"
+           " docs/DECRYPT.md phase 2b. `kirk1` decrypts a raw CMD1 blob today.)\n");
+
+    psp_blob_free(&b);
+    return 0;
+}
+
+/* Decrypt a raw KIRK CMD1 blob. Complete and tested — the layer above it is
+ * what is still missing. */
+static int cmd_kirk1(const char *path, const char *outpath, const char *keypath) {
+    psp_blob b;
+    if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
+
+    key_store ks;
+    keys_load(&ks, keypath);
+
+    char err[256];
+    const uint8_t *kirk1 = keys_require(&ks, "kirk1", 16, err, sizeof err);
+    if (!kirk1) {
+        fprintf(stderr, "%s\n", err);
+        fprintf(stderr, "See docs/DECRYPT.md for the key file format.\n");
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    kirk1_info info;
+    uint8_t *out = NULL;
+    uint32_t out_len = 0;
+    kirk_result r = kirk_cmd1_decrypt(kirk1, b.data, b.size, &info, &out, &out_len);
+
+    /* Structural failures happen before any CMAC is computed, so reporting
+     * "CMAC: FAILED" for them would point at the key when the real problem is
+     * that this is not a CMD1 blob at all. */
+    if (r == KIRK_ERR_TOO_SMALL || r == KIRK_ERR_BAD_MODE ||
+        r == KIRK_ERR_ECDSA     || r == KIRK_ERR_SIZE_OVERFLOW) {
+        fprintf(stderr, "not a usable KIRK CMD1 blob: %s\n", kirk_strerror(r));
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    printf("mode:         %u\n", info.mode);
+    printf("signature:    %s\n", info.use_ecdsa ? "ECDSA" : "AES-CMAC");
+    printf("data size:    %u\n", info.data_size);
+    printf("padding:      0x%X\n", info.data_offset);
+    printf("header CMAC:  %s\n", info.header_cmac_ok ? "OK" : "FAILED");
+    printf("body CMAC:    %s\n", info.data_cmac_ok ? "OK" : "FAILED");
+
+    if (r != KIRK_OK) {
+        fprintf(stderr, "\ndecryption failed: %s\n", kirk_strerror(r));
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    if (outpath) {
+        FILE *f = fopen(outpath, "wb");
+        if (!f) { fprintf(stderr, "cannot write %s\n", outpath); psp_blob_free(&b); return 1; }
+        fwrite(out, 1, out_len, f);
+        fclose(f);
+        printf("\nwrote %u bytes to %s (%s)\n", out_len, outpath,
+               psp_format_name(psp_sniff(out, out_len < 16 ? out_len : 16)));
+    }
+
+    psp_blob_free(&b);
+    return 0;
+}
+
 /* ---- main ---------------------------------------------------------------- */
 
 int main(int argc, char **argv) {
@@ -433,6 +640,17 @@ int main(int argc, char **argv) {
         uint32_t start = (argc > 3) ? (uint32_t)strtoul(argv[3], NULL, 0) : 0;
         uint32_t count = (argc > 4) ? (uint32_t)strtoul(argv[4], NULL, 0) : 64;
         return cmd_dis(argv[2], start, count);
+    }
+
+    /* --keys may follow any of the crypto subcommands. */
+    const char *keypath = NULL;
+    for (int i = 3; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--keys")) keypath = argv[i + 1];
+
+    if (!strcmp(cmd, "decrypt")) return cmd_decrypt(argv[2], keypath);
+    if (!strcmp(cmd, "kirk1")) {
+        const char *out = (argc > 3 && strcmp(argv[3], "--keys")) ? argv[3] : NULL;
+        return cmd_kirk1(argv[2], out, keypath);
     }
 
     return usage();

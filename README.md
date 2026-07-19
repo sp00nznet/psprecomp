@@ -59,7 +59,7 @@ the toolkit is the thing other people fork to recompile *their* PSP game.
           native executable — the recompiled game runs
 ```
 
-## Status — the container stack runs on real discs; decryption is the gate
+## Status — containers and KIRK CMD1 are up; the PRX tag layer is the gate
 
 Phase 1 is done and it is real, not a skeleton. Pointed at a retail PSN dump of
 *WTF: Work Time Fun*, the tool walks the disc, identifies every layer, and
@@ -108,8 +108,25 @@ boot chain:
 - ✅ **The memory map** (`mem.c`) — scratchpad / VRAM / main RAM with the three
   cache mirrors folded onto one backing store, straddling accesses rejected,
   and unmapped accesses counted rather than silently swallowed.
-- ✅ **`ctest`, all synthetic** — decoder, runtime and container suites. No game
-  data, no ROM, no disc image in the repo or in the tests.
+- ✅ **AES-128/192/256 and AES-CMAC** (`crypto/`) — self-contained, no
+  dependency, validated against **FIPS-197**, **NIST SP 800-38A** and
+  **RFC 4493** before ever touching a game module. The AES S-box is *derived*
+  from its algebraic definition rather than transcribed as a table, so it is
+  either completely right or obviously wrong.
+- ✅ **KIRK CMD1, complete** (`crypto/kirk.c`) — key unwrapping, both CMAC
+  verifications, body decryption, with padding and unaligned lengths handled
+  and every size field bounds-checked. Verified end to end against synthetic
+  blobs: a wrong key is caught at the **header** CMAC, a tampered body at the
+  **data** CMAC. That separation is the point — it makes "did the key work?"
+  a yes/no answer instead of a judgement call about whether the output looks
+  like code. **No PSP key material is needed to prove any of this**, because
+  CMD1's structure does not depend on which key you feed it.
+- ✅ **External key loading** — `--keys`, `$PSPRECOMP_KEYS`, or
+  `./keys/psp_keys.txt`. Nothing is bundled; a missing key is a named
+  diagnostic, not a mystery.
+- ✅ **`ctest`, all synthetic** — decoder, runtime, container, crypto and KIRK
+  suites. No game data, no ROM, no disc image, and no key material in the repo
+  or in the tests.
 
 **The gate: every module on a retail disc is encrypted**
 
@@ -134,13 +151,38 @@ format:   ~PSP encrypted PRX
   tag           0xF8710C50
 ```
 
-This is the same shape as the Lynx's encrypted boot block: a well-understood,
-publicly-documented decryption standing between the tool and real code, and the
-next thing to build. See [`docs/DECRYPT.md`](docs/DECRYPT.md) and
-[`ROADMAP.md`](ROADMAP.md) phase 2.
+KIRK CMD1 — the layer that actually decrypts — is done. What remains is the
+per-tag transform *above* it that constructs the CMD1 header. And we established
+that by measurement, not assumption: `decrypt` scans for an embedded CMD1
+metadata block using a ~100-bit structural signature and finds none anywhere in
+these modules, which means the CMD1 header is **constructed** by the tag layer
+rather than sitting at a fixed offset. Guessing that offset would have produced
+silently-wrong output.
+
+```
+$ allegrexrecomp decrypt b02_bootbin.dat
+module:   boot_bin
+tag:      0x4597CB4E   decrypt mode 10
+sizes:    4105088 encrypted -> 4104742 decrypted
+
+probing for a KIRK CMD1 metadata block...
+  none found in the first 0x400 bytes
+```
+
+The same run turned up that WTF's main executable uses **decrypt mode 9** while
+all five game-sharing modules use **mode 10** — so the disc exercises at least
+two variants of the transform. See [`docs/DECRYPT.md`](docs/DECRYPT.md) and
+[`ROADMAP.md`](ROADMAP.md) phase 2b.
+
+**Worth being clear about:** phase 2b is not what gates recompilation. Phase 3
+needs *plaintext*, not necessarily *our* decryptor —
+[`pspdecrypt`](https://github.com/John-K/pspdecrypt) (GPL-3.0), run as a
+separate process exactly like PPSSPP-as-oracle, produces it today. Finishing
+our own decryptor is about being self-contained, which is a goal but not a
+blocker.
 
 **Not started yet:** function discovery, the C emitter, the HLE library, the
-interpreter oracle. None are blocked on anything but phase 2.
+interpreter oracle.
 
 ```
 # each Allegrex routine will become a readable C function; today the same

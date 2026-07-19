@@ -13,3 +13,13 @@ add_test(NAME runtime COMMAND test_runtime)
 add_executable(test_container test_container.c)
 target_link_libraries(test_container PRIVATE allegrex_core)
 add_test(NAME container COMMAND test_container)
+
+# Published standard vectors only (FIPS-197, SP 800-38A, RFC 4493) — no PSP
+# key material, no game data.
+add_executable(test_crypto test_crypto.c)
+target_link_libraries(test_crypto PRIVATE allegrex_core)
+add_test(NAME crypto COMMAND test_crypto)
+
+add_executable(test_kirk test_kirk.c)
+target_link_libraries(test_kirk PRIVATE allegrex_core)
+add_test(NAME kirk COMMAND test_kirk)

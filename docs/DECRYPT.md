@@ -42,23 +42,120 @@ appearing to work.
 ## KIRK
 
 Decryption runs through the PSP's KIRK crypto engine. For game modules the
-relevant operation is **CMD1** (decrypt-and-verify): an AES-128-CBC body
-decryption whose key is itself derived by AES from a per-tag key, with a
-CMAC/ECDSA header signature that we can *check* but do not need to *forge*.
+relevant operation is **CMD1** (decrypt-and-verify).
 
-The pieces:
+The work splits cleanly into two halves, and the first is done.
 
-1. **AES-128.** A standard, self-contained implementation — no dependency, ~200
-   lines, and testable against the FIPS-197 vectors before it ever sees a game
-   module.
-2. **The tag → key table.** Each `~PSP` header's tag at offset `0x130` selects a
-   key set. These constants have been public in the homebrew community since
-   the PSP's active life; they are published facts, the same way the Lynx boot
-   ROM's RSA modulus is a published public key. **They are not distributed in
-   this repository** — the `keys/` directory is `.gitignore`d and the user
-   supplies their own, exactly as with the Lynx boot ROM.
-3. **Segment reassembly.** The decrypted output is reassembled into a valid
-   ELF32 using the segment table already parsed from the header.
+### Phase 2a — the crypto core and KIRK CMD1 ✅
+
+**AES-128/192/256** (`crypto/aes.c`), self-contained, no dependency. The S-box
+is *derived* at init from its algebraic definition (multiplicative inverse in
+GF(2⁸), then the affine transform) rather than pasted in as a 256-byte table —
+a mistyped constant in a transcribed table produces an implementation that
+fails only for certain inputs, which is exactly the kind of bug that survives
+casual testing.
+
+**AES-CMAC** (`crypto/cmac.c`), RFC 4493.
+
+Both are validated against the primary standards before they ever see a game
+module: FIPS-197 Appendix C for the block cipher at all three key sizes,
+NIST SP 800-38A F.2 for CBC, RFC 4493 for CMAC. `ctest` target `crypto`.
+
+**KIRK CMD1** (`crypto/kirk.c`) — the full decrypt-and-verify path:
+
+1. AES-CBC-decrypt header bytes `0x00`–`0x1F` with the KIRK1 key, IV = 0. This
+   is one 0x20-byte run, so the block at `0x10` chains against the *ciphertext*
+   at `0x00`. Yields the body AES key and the CMAC key.
+2. CMAC the 0x30-byte metadata block at `0x60`; compare against `0x20`.
+3. CMAC the metadata + padding + still-encrypted body; compare against `0x30`.
+   This authenticates the ciphertext, so it is computed *before* decryption.
+4. AES-CBC-decrypt the body at `0x90 + padding`, IV = 0.
+
+The CMACs are why this was worth building carefully. **They turn "did the key
+work?" from a judgement call into a yes/no answer** — and they distinguish the
+two failure modes: a wrong KIRK1 key fails at step 2, while a correct key with
+a corrupt body fails at step 3. Both are separately tested.
+
+The whole path is verified end to end by `ctest` target `kirk`, using synthetic
+CMD1 blobs built with arbitrary test keys. **No PSP key material is needed for
+this**, because CMD1's structure does not depend on which key you feed it — a
+round trip under a test key proves the algorithm exactly as well as a round
+trip under Sony's would. That property is the reason CMD1 was worth
+implementing before the key question was settled.
+
+### Phase 2b — the `~PSP` tag layer (remaining)
+
+Above CMD1 sits a per-tag transform: the `~PSP` header's tag at offset `0x130`
+selects a key set, which is used to construct the CMD1 header that CMD1 then
+consumes.
+
+**We measured rather than assumed.** `allegrexrecomp decrypt` scans a module
+for an embedded CMD1 metadata block — a heavily constrained ~100-bit signature
+(mode exactly 1, signature flag 0 or 1, a retail/devkit word that is 0 or
+all-ones, 0x18 bytes of mandatory zeros, a plausible data size). Run against
+every module on the WTF disc, it finds **nothing**:
+
+```
+$ allegrexrecomp decrypt b02_bootbin.dat
+module:   boot_bin
+tag:      0x4597CB4E   decrypt mode 10
+sizes:    4105088 encrypted -> 4104742 decrypted
+
+probing for a KIRK CMD1 metadata block...
+  none found in the first 0x400 bytes
+```
+
+That is a useful negative: the CMD1 header is **not** sitting in the `~PSP`
+header in plaintext waiting to be pointed at. It is *constructed* by the tag
+layer, which means that layer does real cryptographic work (a key-derivation
+step and a scramble) rather than being a memcpy at a fixed offset. Guessing an
+offset would have produced silently-wrong output; the probe rules that out.
+
+Also learned from the same run: **the main executable uses decrypt mode 9,
+while all five game-sharing modules use mode 10.** The mode selects which
+variant of the transform applies, so WTF exercises at least two of them.
+
+What remains for 2b:
+
+- [ ] The tag → key-set table, loaded from the external key file.
+- [ ] The mode 9 and mode 10 transforms that build a CMD1 header from a `~PSP`
+      header. This needs the reference algorithm; it is intricate enough that
+      approximating it from memory would produce plausible garbage, and the
+      CMACs would (correctly) reject it without telling us which step was wrong.
+- [ ] Segment reassembly into a valid ELF32 using the header's segment table.
+
+## Keys are never bundled
+
+**No key material is distributed with this toolkit.** Keys load from an external
+file — `--keys <path>`, then `$PSPRECOMP_KEYS`, then `./keys/psp_keys.txt`,
+which is gitignored. See [`psp_keys.example.txt`](psp_keys.example.txt) for the
+format.
+
+The PSP's constants have been public since the console's active life and are
+published facts, in the same sense that the Lynx boot ROM's RSA modulus is a
+published public key — but they are not this project's to redistribute. This is
+the same arrangement `lynxrecomp` has with the Lynx boot ROM.
+
+Keeping keys as data rather than baked-in constants is also better engineering:
+a wrong key produces a named diagnostic (`key 'kirk1' not found in
+keys/psp_keys.txt`) instead of a mysterious failure, and a correction needs no
+rebuild.
+
+## The pragmatic unblock
+
+Phase 2b is not on the critical path for *recompilation*. Phase 3 — function
+discovery and the C emitter, where the actual recompilation value is — needs
+**plaintext ELF**, not necessarily *our* decryptor.
+
+[`pspdecrypt`](https://github.com/John-K/pspdecrypt) (GPL-3.0) produces
+plaintext today. Used as a separate process it is an external tool, exactly
+like PPSSPP-as-oracle or a headless Ghidra run — nothing is linked, nothing is
+copied, and the toolkit stays MIT. That path unblocks phase 3 immediately while
+2b is built properly.
+
+Building our own decryptor is about being **self-contained**, which matters
+eventually — a one-command pipeline from disc to native executable is the goal
+— but it is not what gates progress.
 
 ## How we will know it worked
 
