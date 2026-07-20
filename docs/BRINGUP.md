@@ -3926,3 +3926,42 @@ frame really does shift. The checker has not yet found the site responsible.
 2. Re-run. If the -48 site appears, it is the bug; if nothing appears, the
    shift happens somewhere the check cannot see -- most likely across a tail
    jump between split bodies, where no single body owns both halves of a frame.
+
+## With the filter working: one real leak
+
+The tool had to be **rebuilt** after the source was copied into the submodule --
+the previous run used a stale `allegrexrecomp` and reported the unfiltered
+result. That is the fifth stale-build confusion in this session, and the
+symptom is always the same: an edit that provably exists in the source has no
+effect on the output.
+
+Rebuilt properly, checks drop from 3,866 to 3,038 and violations from 11 to 9:
+
+```
+sp UNBALANCED in 0x0004D824: +16     |
+sp UNBALANCED in 0x0004D758: +16     |  split continuations: an epilogue
+sp UNBALANCED in 0x0004C394: +16     |  without its prologue. Still noise,
+sp UNBALANCED in 0x0000F76C: +16     |  filterable by requiring the body to
+sp UNBALANCED in 0x0006DAD4: +16     |  begin with a stack decrement.
+sp UNBALANCED in 0x0000E36C: +48     |
+sp UNBALANCED in 0x0000E204: -48   <-- the leak
+```
+
+The tail-jump false positive at `0x0000D60C` is gone, and **exactly one
+negative delta survives**: `0x0000E204`, the `jr $ra` of `0x0000E0AC`, returning
+48 bytes short.
+
+That is the same -48 measured independently between the two allocator calls, at
+a genuine return in a body that owns its prologue. Two different methods, same
+number, same function.
+
+### This is the site
+
+`0x0000E0AC` decrements `$sp` by 32 at entry and its epilogue adds 32 back, so
+a balanced return is expected. Returning -48 short means either an exit path
+skips part of the restore, or a callee left the stack 48 low and the epilogue''s
+`+32` cannot compensate for what it never allocated.
+
+Reading `psp_body_0000E0AC` around the return at `0x0000E204`, with the frame
+arithmetic in mind rather than a fixed context window, is the next step -- and
+this time the address is exact rather than a function-wide count.
