@@ -572,6 +572,41 @@ static int cmd_funcs(const char *path, int list) {
     printf("reached:    %u bytes (%.2f%% of .text)\n", an.bytes_reached,
            an.size ? 100.0 * an.bytes_reached / an.size : 0.0);
     printf("imports:    %d distinct firmware calls\n", an.nimports);
+
+    /* Which firmware libraries this module actually needs. This is the HLE
+     * work list: everything here has to exist before the game runs, and
+     * nothing outside it does. */
+    if (e.modinfo_size) {
+        psp_module_info mi2;
+        if (psp_modinfo_parse(b.data, b.size, e.modinfo_offset, &mi2) == 0) {
+            uint32_t bias = e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0;
+            int nimp = psp_collect_imports(b.data, b.size, &mi2, bias, NULL, 0);
+            psp_import_entry *imp = (psp_import_entry *)malloc((size_t)(nimp ? nimp : 1) * sizeof *imp);
+            if (imp) {
+                nimp = psp_collect_imports(b.data, b.size, &mi2, bias, imp, nimp);
+
+                /* Count functions per library, preserving first-seen order. */
+                char libs[64][32];
+                int counts[64], nlibs = 0;
+                for (int i = 0; i < nimp; i++) {
+                    int k = 0;
+                    for (; k < nlibs; k++) if (!strcmp(libs[k], imp[i].lib)) break;
+                    if (k == nlibs && nlibs < 64) {
+                        snprintf(libs[nlibs], sizeof libs[0], "%s", imp[i].lib);
+                        counts[nlibs] = 0;
+                        nlibs++;
+                    }
+                    if (k < 64) counts[k]++;
+                }
+                printf("\nfirmware libraries needed (%d functions across %d libraries):\n",
+                       nimp, nlibs);
+                for (int k = 0; k < nlibs; k++)
+                    printf("  %-24s %d\n", libs[k], counts[k]);
+                free(imp);
+            }
+        }
+    }
+
     printf("indirect:   %d unresolved computed jumps\n", an.nindirects);
 
     /* The honest VFPU cost for this title: measured over discovered code, not

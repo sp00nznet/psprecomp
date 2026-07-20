@@ -324,6 +324,57 @@ Anything not yet translated — the VFPU, 0.11–0.16% of instructions — emits
 **named run-time trap**, never silence. A gap that announces itself is worth
 far more than one that produces a program which runs and is wrong.
 
+## Validated against a wider corpus
+
+Retail discs encrypt everything, but **prototype and test-sample discs often
+ship `BOOT.BIN` as a plain, unencrypted ELF** — no decryption step at all.
+That makes them a free correctness corpus, and four of them run clean:
+
+| Module | functions | reached | instructions | VFPU | invalid |
+|---|---:|---:|---:|---:|---:|
+| Killzone Liberation (test sample) | 185 | 96.2% | 12,046 | 0.00% | **0** |
+| Ratchet & Clank: Size Matters (beta) | 325 | 92.8% | 16,338 | 0.00% | **0** |
+| Pursuit Force 0.04 | 5,321 | **99.3%** | 305,866 | 0.03% | **0** |
+| ATV Offroad Fury (test sample) | 24,749 | 91.2% | 1,260,740 | 0.87% | **0** |
+
+Five distinct games from four different studios, up to 1.26 million
+instructions, **zero invalid decodes anywhere**. VFPU stays under 1% even on
+the 3D titles. These are also useful precisely because they need no
+decryption — the pipeline can be exercised end to end without any key
+material at all.
+
+They immediately exposed a bug the WTF disc could not: those modules carry one
+stub section **per firmware library** (`.sceStub.text.sceCtrl`,
+`.sceStub.text.sceGe_user`, …) rather than a single `.sceStub.text`. Matching
+the exact name found nothing, so every firmware call was being counted as an
+internal function.
+
+## Imports, named — the HLE work list
+
+The module's own import table names every firmware function it calls: which
+library, its NID, and the thunk address. So `allegrexrecomp funcs` can report
+exactly what has to exist before a game runs — and nothing outside it does:
+
+```
+$ allegrexrecomp funcs b02_lumberjack.elf
+firmware libraries needed (163 functions across 23 libraries):
+  ThreadManForUser         24
+  sceSasCore               21
+  sceGe_user               11
+  sceNetAdhocctl           10
+  sceNetAdhoc              10
+  sceUtility               10
+  IoFileMgrForUser          9
+  sceAudio                  9
+  ModuleMgrForUser          7
+  SysMemUserForUser         6
+  ...
+```
+
+That is the HLE roadmap, derived rather than guessed. It also shows what can be
+deferred: the 28 ad-hoc networking functions are the game-sharing path, not
+something a single-player bring-up needs.
+
 ## The remaining ~11%
 
 Not yet reached, and honestly accounted for rather than rounded away:

@@ -336,10 +336,29 @@ int elf_parse(const uint8_t *d, size_t len, elf_info *out) {
                 out->text_size = size;
                 out->text_from_section = 1;
             }
-        } else if (avail > 13 && strncmp(name, ".sceStub.text", 14) == 0) {
-            out->stub_addr = addr;
-            out->stub_offset = off;
-            out->stub_size = size;
+        } else if (avail > 13 && strncmp(name, ".sceStub.text", 13) == 0) {
+            /* Prefix match, deliberately not an exact one. A module carries
+             * either a single `.sceStub.text` or one section *per firmware
+             * library* (`.sceStub.text.sceCtrl`, `.sceStub.text.sceGe_user`,
+             * ...). Matching the exact name only finds nothing at all on the
+             * per-library layout — which reports zero imports and lets every
+             * firmware call be mistaken for an internal function.
+             *
+             * The sections are contiguous in practice, so their union is the
+             * range to test membership against. */
+            if (!out->stub_size) {
+                out->stub_addr = addr;
+                out->stub_offset = off;
+                out->stub_size = size;
+            } else {
+                uint32_t hi = out->stub_addr + out->stub_size;
+                if (addr + size > hi) hi = addr + size;
+                if (addr < out->stub_addr) {
+                    out->stub_offset = off;
+                    out->stub_addr = addr;
+                }
+                out->stub_size = hi - out->stub_addr;
+            }
         } else if (avail > 21 && strncmp(name, ".rodata.sceModuleInfo", 22) == 0) {
             out->modinfo_addr = addr;
             out->modinfo_offset = off;
@@ -387,6 +406,73 @@ int psp_modinfo_parse(const uint8_t *d, size_t len, uint32_t file_offset,
     return 0;
 }
 
+int psp_collect_imports(const uint8_t *d, size_t len,
+                        const psp_module_info *mi, uint32_t load_bias,
+                        psp_import_entry *out, int max) {
+    if (mi->stub_end <= mi->stub_top) return 0;
+
+    int found = 0;
+
+    /* Each library the module imports from gets one PspLibStub entry:
+     *
+     *   0x00 u32  name        pointer to the library's name string
+     *   0x04 u16  version
+     *   0x06 u16  attribute
+     *   0x08 u8   entLen      entry size in words (5 -> 20 bytes)
+     *   0x09 u8   varCount
+     *   0x0A u16  funcCount
+     *   0x0C u32  nidTable    funcCount NIDs
+     *   0x10 u32  stubTable   funcCount thunks, 8 bytes each
+     *
+     * entLen is honoured rather than assumed: some modules use a longer entry,
+     * and striding by a fixed 20 bytes walks off into the middle of the next
+     * one and produces convincing nonsense. */
+    uint32_t e = mi->stub_top;
+    while (e + 0x14 <= mi->stub_end) {
+        size_t off = (uint32_t)(e + load_bias);
+        if (off + 0x14 > len) break;
+
+        uint32_t name_ptr  = rd32(d + off + 0x00);
+        uint8_t  ent_len   = d[off + 0x08];
+        uint16_t func_cnt  = rd16(d + off + 0x0A);
+        uint32_t nid_table = rd32(d + off + 0x0C);
+        uint32_t stub_tbl  = rd32(d + off + 0x10);
+
+        uint32_t stride = ent_len ? (uint32_t)ent_len * 4 : 0x14;
+
+        /* Library name, bounded so a bogus pointer cannot run off the buffer. */
+        char lib[32];
+        lib[0] = '\0';
+        size_t np = (uint32_t)(name_ptr + load_bias);
+        if (name_ptr && np < len) {
+            size_t n = 0;
+            while (n < sizeof lib - 1 && np + n < len && d[np + n]) {
+                lib[n] = (char)d[np + n];
+                n++;
+            }
+            lib[n] = '\0';
+        }
+
+        size_t nids  = (uint32_t)(nid_table + load_bias);
+        size_t stubs = (uint32_t)(stub_tbl + load_bias);
+        for (uint16_t i = 0; i < func_cnt; i++) {
+            if (nids + (size_t)i * 4 + 4 > len) break;
+            if (found < max) {
+                psp_import_entry *it = &out[found];
+                it->nid  = rd32(d + nids + (size_t)i * 4);
+                it->addr = stub_tbl + (uint32_t)i * 8;   /* 8 bytes per thunk */
+                snprintf(it->lib, sizeof it->lib, "%s", lib[0] ? lib : "unknown");
+            }
+            found++;
+        }
+        (void)stubs;
+
+        if (stride < 0x14) break;                 /* malformed; do not loop */
+        e += stride;
+    }
+    return found;
+}
+
 int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
                               uint32_t load_bias, uint32_t *out, int max) {
     if (!e->shoff || !e->shnum || !e->text_size) return 0;
@@ -419,7 +505,7 @@ int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
             /* The relocated word holds the address. A PRX links at zero, so
              * the stored value is already the module-relative address and
              * needs no fixing up — only reading. */
-            size_t at = (size_t)r_offset + load_bias;
+            size_t at = (uint32_t)(r_offset + load_bias);
             if (at + 4 > len) continue;
 
             uint32_t target = rd32(d + at);
@@ -441,7 +527,7 @@ int psp_collect_exports(const uint8_t *d, size_t len,
     int found = 0;
     /* Each entry is 0x10 bytes and describes one exported library. */
     for (uint32_t e = mi->ent_top; e + 0x10 <= mi->ent_end; e += 0x10) {
-        size_t off = (size_t)e + load_bias;
+        size_t off = (uint32_t)(e + load_bias);
         if (off + 0x10 > len) break;
 
         uint8_t  nfunc   = d[off + 0x08];
@@ -452,7 +538,7 @@ int psp_collect_exports(const uint8_t *d, size_t len,
          * We want the function addresses: the first `nfunc` of the second
          * half. Variables are data and are deliberately skipped. */
         uint32_t total = (uint32_t)nfunc + nvar;
-        size_t addrs = (size_t)table + load_bias + (size_t)total * 4;
+        size_t addrs = (size_t)(uint32_t)(table + load_bias) + (size_t)total * 4;
         if (addrs + (size_t)nfunc * 4 > len) continue;
 
         for (uint8_t i = 0; i < nfunc; i++) {

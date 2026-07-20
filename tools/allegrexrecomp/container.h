@@ -202,6 +202,26 @@ int psp_collect_exports(const uint8_t *data, size_t len,
                         const psp_module_info *mi, uint32_t load_bias,
                         uint32_t *out, int max);
 
+/* ---- imports --------------------------------------------------------------
+ * The import table names every firmware function a module calls: which
+ * library it comes from, its NID (a hash of the function name), and the
+ * address of the thunk that calls it.
+ *
+ * This is what turns `psp_import_089F0488()` into
+ * `psp_import_sceCtrl_1F4011E6()` in the generated C, and — more to the point
+ * — it *is* the HLE work list. Everything in this table has to exist before a
+ * game can run, and nothing outside it does. */
+
+typedef struct {
+    uint32_t addr;      /* the thunk address, in .sceStub.text */
+    uint32_t nid;       /* hash of the function name */
+    char     lib[32];   /* e.g. "sceCtrl", "sceGe_user", "Kernel_Library" */
+} psp_import_entry;
+
+int psp_collect_imports(const uint8_t *data, size_t len,
+                        const psp_module_info *mi, uint32_t load_bias,
+                        psp_import_entry *out, int max);
+
 #ifdef __cplusplus
 }
 #endif
