@@ -2399,3 +2399,46 @@ The stall at `0x00067E58` is therefore a *different* list from the one
 `0x0004D6F0` initialises: one whose head at `s0 + 184` is still zero. Since the
 constructor pass demonstrably reaches list-init code, the question is narrow --
 which lists does that pass cover, and what covers this one.
+
+## The first table is now initialised — proof the fix works
+
+```
+table 0x003EC384 header: +16=0x0002    (was 0x0000)
+```
+
+Non-zero, and reached through the constructor pass. The structure that spun ten
+billion times is genuinely built now, not worked around.
+
+## The second list has no writer either
+
+```
+regs at stall: s0=0x0030BF24 s1=0x00000000 s3=0x00312D60
+```
+
+`$s1` is **zero** mid-walk: the loop does `s1 = *(s1 + 4)` and read a null next
+pointer, so it then reads `*(0 + 4)` -- address 4, inside the module header --
+and follows whatever is there. That is the garbage the string compare chokes on.
+
+A write-watch on the list head (`s0 + 184` = `0x0030BFDC`):
+
+```
+NOTHING WRITES THE STALLED LIST HEAD
+```
+
+Same signature as the first table before the constructors were found, and the
+same technique identified it. So there is a second family of structures whose
+initialiser never runs.
+
+Note the constructor table found was the *longest* null-terminated run in the
+region; `psp_ctors_find` returns only the best candidate. A second, shorter
+array would be invisible to it. That is a plausible and cheap next check, and
+the API should probably enumerate rather than pick.
+
+## Session end
+
+`pixels written: 0`. WTF does not render.
+
+The blocker is one structural question with a proven method behind it: **find
+what initialises the list at `s0 + 184`.** A write-watch says nothing does; the
+same watch on the previous table led to the static-constructor table, which
+turned out to explain a dozen separate symptoms.
