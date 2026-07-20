@@ -2374,3 +2374,28 @@ Running the constructors belongs at load time. The host currently calls them
 explicitly; a real module loader should do it as part of bringing a PRX up,
 because *every* recompiled C++ module has this problem and none of them will
 report it.
+
+## What the constructors unlocked
+
+With the constructor table run:
+
+```
+0x0004D6F0  REACHED        (the list initialiser -- was never reached)
+0x00067E08  REACHED        (subsystem tier)
+0x00066C34  REACHED
+0x00066DB4  never reached  (one of five callers of 0x00067E08; another is used)
+```
+
+`0x0004D6F0` -- the routine that writes the terminator into a list head, and
+the thing this investigation spent many sections hunting -- **now runs**. So the
+constructor pass reaches the list-initialisation machinery, which is exactly
+what it was supposed to do.
+
+The subsystem tier that this document repeatedly recorded as "never runs" also
+executes now, via a different one of its five callers than the one traced
+earlier.
+
+The stall at `0x00067E58` is therefore a *different* list from the one
+`0x0004D6F0` initialises: one whose head at `s0 + 184` is still zero. Since the
+constructor pass demonstrably reaches list-init code, the question is narrow --
+which lists does that pass cover, and what covers this one.
