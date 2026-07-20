@@ -2781,3 +2781,51 @@ installs the vptrs on these seventeen sub-objects? Static constructors built
 record 1 and whatever owns it; they do not reach these. The answer is a
 constructor pass over the array -- and its entry point is one of the two
 orphans above, reachable only once a vptr exists to dispatch through.
+
+## Measured: the record builder runs four times, not seventeen
+
+```
+build #1: record=0x0030B0A0 arg1=0x003AF8F0     <- a real record
+build #2: record=0x09FFF8F0 ...                 <- stack temporary
+build #3: record=0x09FFF8F0 ...                 <- stack temporary
+build #4: record=0x09FFF8F0 ...                 <- stack temporary
+```
+
+`0x00068360` is called four times: once on a static record and three times on
+stack objects. **There is no loop building seventeen records through it.** So
+the array elements are constructed some other way -- which is consistent with
+`0x00066C78` dispatching slot 3 on each of seventeen objects, that being the
+construction call, and every vptr being null.
+
+`0x00073CB0` and `0x00073DA4` are not the answer either: scanning the whole
+image finds **no data reference to them at all**, so they are neither called
+nor present in any vtable. Dead code in this module.
+
+## Where the vptrs would come from
+
+The seventeen objects live at `0x00415B68` onward, in `.bss` (past
+`filesz 0x3B4880`, inside `memsz 0x4B0180`). A write-watch on the first
+object''s vptr slot (`+12`, `0x00415B74`):
+
+```
+NOTHING WRITES THE VPTR SLOT
+```
+
+And the generated code contains **no `lui 0x0041`**, so that address is never
+formed as an absolute constant -- it must arrive via a stored pointer or a
+different base. That is the thread to pull next: find how `0x00415B68` is
+computed, and the code that computes it is the code that owns the array.
+
+## Session state
+
+`pixels written: 0`. The chain from cause to symptom is measured end to end:
+
+```
+vptrs at 0x00415B68+12.. never written
+  -> 0x00066C78 dispatches slot 3 to address 0, seventeen times
+  -> records 2..17 never constructed
+  -> record 3 reads a non-zero count from file data, defeating the guard
+  -> 0x00067E58 walks a garbage list head and spins
+```
+
+Every link is a measurement, not an inference. The open end is the first line.
