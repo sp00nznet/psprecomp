@@ -3965,3 +3965,44 @@ skips part of the restore, or a callee left the stack 48 low and the epilogue''s
 Reading `psp_body_0000E0AC` around the return at `0x0000E204`, with the frame
 arithmetic in mind rather than a fixed context window, is the next step -- and
 this time the address is exact rather than a function-wide count.
+
+### The epilogue at 0x0000E204 is faithful — so the leak is inherited
+
+```c
+    r_ra = psp_read32(r_sp + 20);
+    r_s4 = psp_read32(r_sp + 16);
+    r_s3 = psp_read32(r_sp + 12);
+    r_s2 = psp_read32(r_sp + 8);
+    r_s1 = psp_read32(r_sp + 4);
+    r_s0 = psp_read32(r_sp + 0);
+    r_sp = r_sp + 32;
+    PSP_SP_CHECK(0x0000E204u);
+    return;
+```
+
+Exact: every saved register restored, `$sp` returned by the same 32 the
+prologue took. `_sp0` is captured at the top of the body, before the
+`addiu $sp, -32`, so a balanced return should show zero delta.
+
+It shows -48. **The deficit is therefore inherited from a callee** -- something
+`0x0000E0AC` calls consumed 48 bytes and never returned them, and `+32` cannot
+repay what this frame never allocated.
+
+That callee does not appear in the violation list, which means its own leak
+happens somewhere the check does not look: a tail jump, or a split body whose
+prologue and epilogue live in different `psp_body_*` functions. The current
+filter excludes exactly those cases -- correctly, to remove false positives,
+but that is also where the real fault is hiding.
+
+### The shape of the remaining work
+
+The check as built cannot see a leak that occurs across a body boundary,
+because no single body owns both halves of the frame. Making it see one means
+tracking `$sp` per *original function* rather than per emitted body -- the
+entry-address plumbing for that already exists, since every body takes an
+`_entry` parameter and interior labels are dispatchable.
+
+That is a real piece of work rather than a one-line filter, and it is the
+correct next step: the -48 is measured twice by independent means, the epilogue
+that reports it is provably faithful, and the only place left for the fault to
+be is the boundary the instrument currently ignores.
