@@ -507,3 +507,25 @@ The second would explain `$ra` too, and it is the more economical explanation.
    silently-lost saves and exactly this register state.
 3. Only then revisit the loop. The loop is a symptom if the register file is
    already wrong.
+
+## Confirmed: setting $ra fixes the register file
+
+`jal`/`jalr` now assign `$ra`, taking the module from **2 to 9,814**
+assignments. At the stall `$ra` is `0x0004DBD8` -- a real code address, and
+exactly the return site after `jal 0x0004DCF8` at `0x0004DBD0`. It was
+`0x09FFFBB0` (a stack address) before.
+
+That pins the stalled frame to `0x0004DBB0` with certainty rather than
+inference, which is the first time any frame here has been identified from
+evidence instead of a trace ordering.
+
+The hang itself is unchanged, and `$s0` still reads `0x003EC37C` -- a pointer,
+where every path through `0x0004DBB0` uses `$s0` as a small index (`sll $s0, 4`
+to form a 16-byte offset, bounded at 1026). So `$s0` is being clobbered, or
+the frame is not the one `$ra` implies. **`$ra` is now trustworthy and `$s0` is
+not: the next thing to fix is whatever writes `$s0`.**
+
+Callee-saved registers are the obvious suspect. Recompiled functions share one
+global register file, so a callee that does not preserve `$s0`-`$s7` across a
+call corrupts its caller silently -- the same shape of bug as `$ra`, and one
+that the `$ra` fix does not address.
