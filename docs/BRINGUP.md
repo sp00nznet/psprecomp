@@ -632,3 +632,49 @@ different memory.
    left zeroed is exactly what a skipped init call produces.
 3. Guard the walk during bring-up so a zeroed table stops instead of spinning;
    that alone may carry execution past this point and into geometry.
+
+## Patching the self-loop advances execution
+
+Breaking the self-loop at run time (host-side, via the entry watch -- an
+experiment, not a fix) moves the program forward:
+
+```
+                    before          after
+stall back-edge     0x0004DD14      0x00067E58
+calls dispatched    38              57
+bad accesses        3               25
+framebuffer         0x04088000      0x04000000
+```
+
+So the diagnosis is right, and **the same failure recurs**: `0x00067E58` is
+another loop, with `s3 = a0 = 0x00312D60` -- a second table, walked the same
+way, stalling the same way.
+
+That is the useful result. This is not one uninitialised table, it is a
+*pattern*, which means chasing the initialiser for this particular table would
+have been the wrong next move. Something systematic leaves these structures
+zeroed.
+
+## The likely shape of it
+
+Two candidates, in order:
+
+1. **A skipped initialiser.** There are now 19 dispatch misses. If one of them
+   is a startup routine that fills these tables, every table it owns stays
+   zeroed and each walk over one self-loops. This fits: the misses appeared
+   before the first stall, and each patched stall reveals another table.
+2. **An allocator contract.** If these tables live in memory the game expects
+   pre-filled (not merely zeroed), the fault is in what hands that memory out.
+
+Candidate 1 is cheaper to test and fits the evidence better -- the 19 misses
+are already logged with their calling function, so the next step is to identify
+them by name rather than guess.
+
+## Next
+
+1. Name the 19 dispatch misses: which functions call them, and is any of them a
+   table initialiser? They are the strongest remaining lead and have never been
+   individually examined.
+2. Keep the self-loop patch available as a bring-up switch. It is wrong as a
+   fix, but it is the only way to see what lies past these stalls while the real
+   cause is unresolved.
