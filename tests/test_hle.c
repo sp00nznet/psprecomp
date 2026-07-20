@@ -283,6 +283,119 @@ static void test_guest_strings(void) {
           "an over-long string is truncated, not overflowed: \"%s\"", small);
 }
 
+/* Build a display list in guest memory and check the walk follows control flow
+ * rather than merely counting words. The list deliberately contains a PRIM
+ * that a JUMP skips over: if it gets counted, the walk is not following jumps. */
+static void test_ge_display_list(void) {
+    psp_ge_reset();
+
+    const uint32_t LIST = 0x08820000u;
+    uint32_t w[16], n = 0;
+
+    /* GE addresses are 24-bit; BASE supplies the high byte. Setting it here
+     * also exercises that path -- a list whose BASE is ignored jumps to the
+     * wrong place and silently executes garbage. */
+    w[n++] = (0x10u << 24) | 0x080000;              /* BASE  -> 0x08000000 */
+    w[n++] = (0x12u << 24) | 0x000123;              /* VTYPE */
+    w[n++] = (0x04u << 24) | (3u << 16) | 6;        /* PRIM triangles, 6 verts */
+    w[n++] = (0x08u << 24) | 0x820020;              /* JUMP -> LIST + 0x20 */
+    w[n++] = (0x04u << 24) | (0u << 16) | 99;       /* PRIM points -- SKIPPED */
+    w[n++] = (0x00u << 24);
+    w[n++] = (0x00u << 24);
+    w[n++] = (0x00u << 24);
+    /* word 8 == LIST + 0x20 */
+    w[n++] = (0x04u << 24) | (6u << 16) | 2;        /* PRIM sprites, 2 verts */
+    w[n++] = (0x0Fu << 24);                          /* FINISH */
+    w[n++] = (0x0Cu << 24);                          /* END */
+
+    for (uint32_t i = 0; i < n; i++) psp_write32(LIST + i * 4, w[i]);
+
+    uint64_t before = psp_ge_command_count();
+    /* sceGeListEnQueue(list, stall=0, cbid, arg) */
+    uint32_t qid = call(psp_nid("sceGeListEnQueue"), LIST, 0, 0, 0);
+    CHECK(qid != 0, "list enqueued, got 0x%08X", qid);
+
+    uint64_t executed = psp_ge_command_count() - before;
+    CHECK(executed == 6, "walked BASE,VTYPE,PRIM,JUMP,PRIM,FINISH = 6, got %llu",
+          (unsigned long long)executed);
+    CHECK(psp_ge_vertex_count() == 8,
+          "counted 6+2 vertices and skipped the jumped-over PRIM, got %llu",
+          (unsigned long long)psp_ge_vertex_count());
+
+    CHECK(call(psp_nid("sceGeDrawSync"), 0, 0, 0, 0) == 0, "draw sync succeeds");
+    CHECK(call(psp_nid("sceGeEdramGetAddr"), 0, 0, 0, 0) == PSP_VRAM_BASE,
+          "eDRAM is the VRAM window");
+    CHECK(call(psp_nid("sceGeEdramGetSize"), 0, 0, 0, 0) == PSP_VRAM_SIZE,
+          "eDRAM is 2 MB");
+}
+
+/* A list that jumps to itself must terminate rather than hang the host -- this
+ * is a normal transient state while the CPU is still writing the list. */
+static void test_ge_infinite_list(void) {
+    psp_ge_reset();
+    const uint32_t LIST = 0x08830000u;
+    psp_write32(LIST + 0, (0x10u << 24) | 0x080000);   /* BASE */
+    psp_write32(LIST + 4, (0x08u << 24) | 0x830000);   /* JUMP to itself */
+
+    uint32_t qid = call(psp_nid("sceGeListEnQueue"), LIST, 0, 0, 0);
+    CHECK(qid != 0, "a self-jumping list still returns");
+}
+
+static void test_sas_adpcm(void) {
+    psp_sas_reset();
+
+    /* One VAG block: shift 8, filter 0, then 28 nibbles. With filter 0 there is
+     * no prediction, so each output sample is just the sign-extended nibble
+     * scaled -- which makes a decode bug obvious rather than merely quieter. */
+    const uint32_t VAG = 0x08840000u;
+    psp_write8(VAG + 0, 0x08);        /* shift 8, filter 0 */
+    psp_write8(VAG + 1, 0x00);        /* flags: not the end */
+    for (uint32_t i = 0; i < 14; i++)
+        psp_write8(VAG + 2 + i, 0x7Fu);   /* nibbles 0xF and 0x7 */
+
+    CHECK(call5(psp_nid("__sceSasInit"), 0, 64 /*grain*/, 32, 0, 44100) == 0,
+          "SAS init");
+
+    /* sceSasSetVoice(core, voice, addr, size, loop) */
+    CHECK(call5(psp_nid("__sceSasSetVoice"), 0, 0, VAG, 16, 0) == 0, "voice set");
+    CHECK(call(psp_nid("__sceSasSetVolume"), 0, 0, 0x1000, 0x1000) == 0, "volume set");
+    CHECK(call(psp_nid("__sceSasSetPitch"), 0, 0, 0x1000, 0) == 0, "pitch set");
+
+    /* Before key-on nothing should be playing. */
+    const uint32_t OUT = 0x08850000u;
+    for (uint32_t i = 0; i < 64 * 4; i += 4) psp_write32(OUT + i, 0);
+    call(psp_nid("__sceSasCore"), 0, OUT, 0, 0);
+    CHECK(psp_sas_nonzero() == 0, "silence before key-on");
+
+    CHECK(call(psp_nid("__sceSasSetKeyOn"), 0, 0, 0, 0) == 0, "key on");
+    call(psp_nid("__sceSasCore"), 0, OUT, 0, 0);
+
+    CHECK(psp_sas_frames() == 2, "two frames rendered, got %llu",
+          (unsigned long long)psp_sas_frames());
+    CHECK(psp_sas_nonzero() > 0, "audio was actually produced after key-on");
+
+    /* The end flag is how a game knows a sound finished; a voice that never
+     * reports ended is a common way for audio to stall after the first sound. */
+    uint32_t ended = call(psp_nid("__sceSasGetEndFlag"), 0, 0, 0, 0);
+    CHECK((ended & ~1u) != 0, "unused voices report ended, got 0x%08X", ended);
+}
+
+static void test_display(void) {
+    psp_display_reset();
+
+    CHECK(call(psp_nid("sceDisplaySetMode"), 0, 480, 272, 0) == 0, "set mode");
+    /* (topaddr, bufferwidth, pixelformat, sync) */
+    CHECK(call(psp_nid("sceDisplaySetFrameBuf"), PSP_VRAM_BASE, 512, 3, 0) == 0,
+          "set framebuffer");
+    CHECK(psp_display_framebuffer() == PSP_VRAM_BASE, "framebuffer recorded");
+
+    uint64_t v0 = psp_display_vblanks();
+    call(psp_nid("sceDisplayWaitVblank"), 0, 0, 0, 0);
+    call(psp_nid("sceDisplayWaitVblankStartCB"), 0, 0, 0, 0);
+    CHECK(psp_display_vblanks() == v0 + 2,
+          "vblank waits advance the frame counter (the bring-up heartbeat)");
+}
+
 int main(void) {
     CHECK(psp_mem_init() == 0, "memory init");
     psp_cpu_reset();
@@ -298,6 +411,10 @@ int main(void) {
     test_event_flags();
     test_threads();
     test_guest_strings();
+    test_ge_display_list();
+    test_ge_infinite_list();
+    test_sas_adpcm();
+    test_display();
 
     psp_mem_free();
 

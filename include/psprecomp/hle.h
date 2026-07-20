@@ -22,6 +22,7 @@
 #include "mem.h"
 
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,6 +90,26 @@ const char *psp_str(uint32_t addr, char *dst, size_t cap);
 void psp_sysmem_init(void);
 void psp_sysmem_register(void);
 void psp_sysmem_reset(void);
+
+void psp_display_init(void);
+void psp_display_register(void);
+void psp_display_reset(void);
+int      psp_display_capture(const char *path);
+uint64_t psp_display_vblanks(void);
+uint32_t psp_display_framebuffer(void);
+
+void psp_ge_init(void);
+void psp_ge_register(void);
+void psp_ge_reset(void);
+void psp_ge_dump_stats(FILE *out);
+uint64_t psp_ge_command_count(void);
+uint64_t psp_ge_vertex_count(void);
+
+void psp_sas_init(void);
+void psp_sas_register(void);
+void psp_sas_reset(void);
+uint64_t psp_sas_frames(void);
+uint64_t psp_sas_nonzero(void);
 
 void psp_threadman_init(void);
 void psp_threadman_register(void);

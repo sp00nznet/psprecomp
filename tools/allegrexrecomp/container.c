@@ -500,6 +500,38 @@ int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
         for (uint32_t r = 0; r + 8 <= size; r += 8) {
             uint32_t r_offset = rd32(d + off + r);
             uint32_t r_info   = rd32(d + off + r + 4);
+
+            /* HI16/LO16 pairs are how an address gets *computed in code*
+             * rather than stored in a word:
+             *
+             *     lui   $a0, %hi(target)
+             *     addiu $a0, $a0, %lo(target)
+             *
+             * That is exactly how a PSP module passes its main thread's entry
+             * point to sceKernelCreateThread -- so without these, the entire
+             * game beyond module_start is unreachable. The relocations come in
+             * pairs, and the address is (hi << 16) + (int16)lo. The LO16 half
+             * is signed, which is why it cannot simply be OR'd in: a low half
+             * of 0x8000 or above borrows from the high half. */
+            if ((r_info & 0xFF) == R_MIPS_HI16 && r + 16 <= size) {
+                uint32_t lo_info = rd32(d + off + r + 12);
+                if ((lo_info & 0xFF) == R_MIPS_LO16) {
+                    uint32_t lo_offset = rd32(d + off + r + 8);
+                    size_t hi_at = (uint32_t)(r_offset + load_bias);
+                    size_t lo_at = (uint32_t)(lo_offset + load_bias);
+                    if (hi_at + 4 <= len && lo_at + 4 <= len) {
+                        uint32_t hi_imm = rd32(d + hi_at) & 0xFFFF;
+                        int32_t  lo_imm = (int16_t)(rd32(d + lo_at) & 0xFFFF);
+                        uint32_t target = (hi_imm << 16) + (uint32_t)lo_imm;
+                        if (target >= text_lo && target < text_hi && !(target & 3)) {
+                            if (found < max) out[found] = target;
+                            found++;
+                        }
+                    }
+                }
+                continue;
+            }
+
             if ((r_info & 0xFF) != R_MIPS_32) continue;
 
             /* The relocated word holds the address. A PRX links at zero, so
