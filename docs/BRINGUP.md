@@ -3624,3 +3624,47 @@ above is read rather than inferred from the trace.
 
 This is a tractable end point: one register, one loop, one function, with the
 allocation now succeeding underneath it.
+
+### $s1 is set correctly and then clobbered across a call
+
+```
+0007436C  lui   $s1, 0x40           ; s1 = 0x00400000
+000743A0  addiu $s1, $s1, -12192    ; s1 = 0x003FD060   <- a valid data address
+...
+000743F4  jal   0x0000E06C          ; the allocator
+...
+00074440  addu  $a0, $s1, $zero     ; s1 measured here as 0x0000E124
+```
+
+`$s1` is `0x003FD060` when set and `0x0000E124` when used. **The allocator call
+between them does not preserve it.**
+
+`$s1` is callee-saved, and `0x0000E06C` saves it properly in its own prologue:
+
+```
+0000E06C  addiu $sp, $sp, -16
+0000E074  sw    $s1, 4($sp)
+0000E078  addu  $s1, $a1, $zero
+```
+
+So the original preserves `$s1`; the recompiled version evidently does not
+restore it. That points at emission rather than at the game -- most likely an
+exit path that leaves without running the epilogue: a tail call, a fall-through
+into another body, or a `return` emitted where the original would have reached
+its restore sequence.
+
+`0x0000E588` -- the one remaining dispatch miss -- sits inside this same
+allocator and has no label, so at least one control-flow edge here is already
+known to be unmodelled. The two are plausibly the same defect.
+
+**This is the third calling-convention fault of the session**, after `$ra`
+never being assigned and `psp_arg` reading the wrong registers. All three
+produce plausible values rather than visible failures, which is why each
+survived so long, and callee-saved restoration is the natural next one to
+verify systematically rather than case by case.
+
+### Concretely
+
+Compare `psp_body_0000E06C`''s emitted exits against the original''s epilogue at
+every `return`. Any path that returns without the `lw $s1, 4($sp)` sequence is
+the bug.
