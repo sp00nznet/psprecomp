@@ -2671,3 +2671,51 @@ zero where an empty circular list must point at itself. The static-constructor
 pass fixes exactly this defect for a different family of lists, so the
 initialiser for these is either in a second table -- not findable by any test
 tried so far -- or in a routine start-up has not yet reached.
+
+## The records are individually guarded — and only one is built
+
+`0x00067E34` does not walk unconditionally:
+
+```
+00067E34  lw   $v0, 16($s0)             ; count
+00067E38  bnel $v0, $zero, 0x00067E48   ; count == 0 -> skip this record
+00067E3C  lw   $s1, 52($s0)             ; delay slot: list head
+00067E40  beq  $zero, $zero, 0x00067EF8 ; skipped
+00067E4C  beql $s1, $v0, 0x00067EA0     ; s1 == s0+184 -> empty, done
+```
+
+So an untouched record is *skipped*, not walked. Measuring the three records the
+loop reaches:
+
+```
+record #1 s0=0x0030B074  count=0x00000000  head=0x0030B12C  sentinel=0x0030B12C
+record #2 s0=0x0030B7CC  count=0x00000000  head=0x00000000  sentinel=0x0030B884
+record #3 s0=0x0030BF24  count=0x6D39C076  head=0x8E62E00E  sentinel=0x0030BFDC
+```
+
+- **Record 1 is correct**: an empty circular list, head pointing at its own
+  sentinel. The file image is zero there, so this was written at run time --
+  the constructor pass built it.
+- **Record 2 is zero**: count 0, so the guard skips it. Harmless.
+- **Record 3 is garbage** in both fields, count non-zero, so it *is* walked --
+  and its head is nonsense. This is the spin.
+
+The stride is right (1880 apart, exactly), the base is right (record 1 is
+correctly built at it), and the loop bound of 17 is hard-coded in the
+instruction. So the array is where the code says it is, and **only one of its
+seventeen records has been constructed**.
+
+Record 3''s garbage comes from the file image (`0x0030BF24 = 0xDEFE35B3`), not
+from `.bss`. An unconstructed record that happens to sit on file data reads a
+non-zero count and defeats the guard that protects record 2.
+
+## What that isolates
+
+This is no longer "a list was not initialised". It is: **the pass that builds
+these seventeen records builds one and stops.** The static-constructor table
+covers whatever built record 1; something else was meant to build the rest, or
+the same routine was meant to loop and does not.
+
+That is a much smaller question than any previously open in this document, and
+it has a direct measurement: watch writes to record 2''s head (`0x0030B884`) and
+record 1''s (`0x0030B12C`) and compare who writes one but not the other.
