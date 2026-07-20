@@ -2442,3 +2442,42 @@ The blocker is one structural question with a proven method behind it: **find
 what initialises the list at `s0 + 184`.** A write-watch says nothing does; the
 same watch on the previous table led to the static-constructor table, which
 turned out to explain a dozen separate symptoms.
+
+## The stalled list head is not a list head
+
+Only one null-terminated array in the whole image points into the high code
+region, so there is no second constructor table there -- that possibility is
+closed.
+
+More useful: `s0 + 184` (`0x0030BFDC`) lies **inside the file image**, so it is
+loaded from disk rather than being `.bss`. What the file has there:
+
+```
+file 0x0030BFDC = 0xCD3FC9BD
+file 0x0030BFE0 = 0x654AFF35
+file 0x0030BF24 = 0xDEFE35B3
+```
+
+Noise -- not pointers, not zero, not a plausible list head. And `$s0` does not
+line up with `$s3` as an array element: `0x00312D60 - 0x0030BF24 = 0x3E3C`,
+which is not a multiple of the 1880-byte stride.
+
+**So `$s0` is a bad pointer, not an uninitialised structure.** The walk is
+reading a region of ordinary data as if it were a linked list, which is why the
+next pointer is null on the first step and why the string compare follows
+nonsense.
+
+That reframes the remaining bug: it is not another missing initialiser. It is
+wrong pointer arithmetic or a wrong base somewhere in the subsystem loop --
+a different class, and one where the `$ra` fix has already proved that codegen
+bugs of exactly this kind exist in this toolkit.
+
+## Resume here
+
+1. Watch `0x00067E34` and record `$s0` and `$s3` on entry, then compare against
+   the stride and the array base. If `$s0` does not start at `$s3`, the base is
+   wrong; if it does, the stride or the loop bound is.
+2. `psp_ctors_find` returns only the longest candidate. It should enumerate;
+   the current API would hide a second, shorter table.
+3. Re-run every theory falsified before the `$ra` fix. That fix invalidated an
+   era of this document and one falsification has already been overturned.
