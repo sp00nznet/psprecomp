@@ -2119,3 +2119,67 @@ earlier still. If instead a reached function *skips* the call to
 `0x0004D694`, that branch is the bug.
 
 Do not shim the tables. Two experiments show it only reveals the next one.
+
+---
+
+# Found it: the static constructors never ran
+
+`0x003B2B40` calls the list-initialiser path and **nothing in the program calls
+it**. Scanning `.data` for runs of code-like pointers found why:
+
+```
+constructor table at 0x003B2FE4:
+  0x003B2FE4 -> 0x003B2AF8
+  0x003B2FE8 -> 0x003B2B40      <- the list initialiser''s caller
+  0x003B2FEC -> 0x003B2B7C
+  0x003B2FF0 -> 0x003B2DF0
+  0x003B2FF4 -> 0x003B2E94
+  0x003B2FF8 -> 0x003B2F38
+  0x003B2FFC -> 0x003B2F88
+  0x003B3000 -> 0x003B2FCC
+  0x003B3004 -> 0x00000000      <- terminator
+```
+
+A null-terminated array of eight function pointers into code above `.text` --
+a C++ **static-constructor table**. The routine that walks it is part of crt0,
+which a PRX gets from the loader rather than from its own image, so nothing in
+the recompiled program was ever going to call it.
+
+That is the systemic cause every symptom pointed at: **one missing pass, not
+many missing initialisers.** Global objects were never constructed, so linked
+lists read as virgin `.bss` and vtable slots read as zero.
+
+Running the eight from the host before `module_start`:
+
+```
+ran 8 static constructors
+before:  last loop back-edge 0x0004DD14   (~10 billion hits)
+after:   last loop back-edge 0x00067E58   (~3.2 billion hits)
+```
+
+**The hang moved.** The chain walk that has dominated this entire investigation
+is fixed. `0x00067E58` is the second table -- the one the earlier single-table
+shim had already revealed, which is consistent: that experiment was patching a
+symptom of exactly this cause.
+
+## Why the search took so long to arrive here
+
+Every level of the walk-up said "never reached", and that was read as "the
+program stopped before getting here". For the constructor tier that reading was
+correct. Here it was not: this code is never reached *by anything*, because its
+only reference is a data pointer, not a call. A caller search over generated C
+cannot see that, and reachability alone cannot distinguish "not yet" from
+"never".
+
+What resolved it was noticing `0x003B2B40` had **no callers at all** -- an
+orphan with live code in it -- and asking what could reach it.
+
+## Next
+
+1. Look for further constructor or init arrays. Candidate pointer runs at
+   `0x003B1038`, `0x003B15D0`, `0x003B16F0`; the runs at `0x003B314C` and
+   beyond are 26 entries each and look like vtables rather than init arrays.
+2. `0x00067E58` is the new stall. Check whether it is another uninitialised
+   structure whose constructor is in a table not yet run.
+3. This belongs in the module loader, not the host: a PRX''s constructor tables
+   should be walked at load time.
