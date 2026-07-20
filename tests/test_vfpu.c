@@ -211,6 +211,138 @@ static void test_compare(void) {
     CHECK(psp_cpu.vfpu_cc & (1u << 5), "comparing a vector to itself sets all-lanes");
 }
 
+/* Read/write a whole matrix through the same addressing the ops use. */
+static void set_matrix(uint32_t v, int n, const float m[4][4]) {
+    const uint32_t mtx = (v >> 2) & 7;
+    for (int c = 0; c < n; c++) {
+        int r[4];
+        psp_vfpu_regs((mtx << 2) | (uint32_t)c, n, r);
+        for (int i = 0; i < n; i++) psp_cpu.v[r[i]] = m[c][i];
+    }
+}
+static void get_matrix(uint32_t v, int n, float m[4][4]) {
+    const uint32_t mtx = (v >> 2) & 7;
+    for (int c = 0; c < n; c++) {
+        int r[4];
+        psp_vfpu_regs((mtx << 2) | (uint32_t)c, n, r);
+        for (int i = 0; i < n; i++) m[c][i] = psp_cpu.v[r[i]];
+    }
+}
+
+static void test_matrix_ops(void) {
+    psp_vfpu_reset();
+    float m[4][4], out[4][4];
+
+    /* vmidt must produce a real identity: ones on the diagonal, zeros
+     * elsewhere. This is what catches the column-addressing bug -- a helper
+     * that walks rows while claiming to walk columns still writes four ones,
+     * just in the wrong places, so only checking the off-diagonal zeros
+     * distinguishes them. */
+    psp_vmidt(0x00, 4);
+    get_matrix(0x00, 4, out);
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++)
+            CHECK_F(out[c][r], (c == r) ? 1.0f : 0.0f, "vmidt element");
+
+    psp_vmzero(0x04, 4);
+    get_matrix(0x04, 4, out);
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) CHECK_F(out[c][r], 0.0f, "vmzero element");
+
+    /* vmmov must copy every element, including off-diagonal ones -- a
+     * diagonal-only copy would pass an identity round-trip. */
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) m[c][r] = (float)(c * 4 + r + 1);
+    set_matrix(0x08, 4, m);
+    psp_vmmov(0x0C, 0x08, 4);
+    get_matrix(0x0C, 4, out);
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) CHECK_F(out[c][r], m[c][r], "vmmov element");
+
+    /* Scaling is orientation-independent, so it can be checked outright. */
+    int k[4];
+    psp_vfpu_regs(0x40, 1, k);
+    psp_cpu.v[k[0]] = 2.5f;
+    psp_vmscl(0x10, 0x08, 0x40, 4);
+    get_matrix(0x10, 4, out);
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) CHECK_F(out[c][r], m[c][r] * 2.5f, "vmscl element");
+}
+
+static void test_matrix_transform(void) {
+    psp_vfpu_reset();
+    float m[4][4], v[4];
+
+    /* Transforming a basis vector must yield the corresponding matrix column.
+     * That is the property which distinguishes this convention from its
+     * transpose -- an identity test would pass either way. */
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) m[c][r] = (float)(c * 4 + r + 1);
+    set_matrix(0x08, 4, m);
+
+    for (int basis = 0; basis < 4; basis++) {
+        int t[4], d[4];
+        psp_vfpu_regs(0x40, 4, t);
+        for (int i = 0; i < 4; i++) psp_cpu.v[t[i]] = (i == basis) ? 1.0f : 0.0f;
+
+        psp_vtfm(0x44, 0x08, 0x40, 4);
+        psp_vfpu_regs(0x44, 4, d);
+        for (int r = 0; r < 4; r++)
+            CHECK_F(psp_cpu.v[d[r]], m[basis][r], "vtfm of a basis vector is that column");
+    }
+
+    /* Multiplying by the identity must be a no-op, in both operand positions. */
+    psp_vmidt(0x00, 4);
+    psp_vmmul(0x0C, 0x08, 0x00, 4);
+    float out[4][4];
+    get_matrix(0x0C, 4, out);
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) CHECK_F(out[c][r], m[c][r], "M * I == M");
+
+    psp_vmmul(0x0C, 0x00, 0x08, 4);
+    get_matrix(0x0C, 4, out);
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) CHECK_F(out[c][r], m[c][r], "I * M == M");
+
+    /* vmmul and vtfm must agree: transforming by a product is the same as
+     * transforming twice. This is the strongest check available without an
+     * external oracle -- it pins the two against each other, though it still
+     * cannot detect a consistent transpose of both. */
+    float a[4][4], b[4][4];
+    for (int c = 0; c < 4; c++)
+        for (int r = 0; r < 4; r++) {
+            a[c][r] = (float)((c + 1) * (r + 2) % 7) - 3.0f;
+            b[c][r] = (float)((c + 3) * (r + 1) % 5) - 2.0f;
+        }
+    /* Every operand needs its OWN matrix. A register's matrix is (vreg>>2)&7,
+     * so 0x08 and 0x48 are both matrix 2 -- an earlier version of this test
+     * used both and quietly overwrote A while computing B*x, then blamed the
+     * implementation. Matrices here: A=2, B=4, AB=5, x=6, results in 7/0/1. */
+    set_matrix(0x08, 4, a);   /* matrix 2 */
+    set_matrix(0x10, 4, b);   /* matrix 4 */
+
+    int t[4];
+    psp_vfpu_regs(0x18, 4, t);            /* matrix 6 */
+    const float in[4] = { 1.0f, -2.0f, 0.5f, 3.0f };
+    for (int i = 0; i < 4; i++) psp_cpu.v[t[i]] = in[i];
+
+    /* (A*B) * x */
+    psp_vmmul(0x14, 0x08, 0x10, 4);       /* matrix 5 */
+    psp_vtfm(0x1C, 0x14, 0x18, 4);        /* matrix 7 */
+    float combined[4];
+    int d[4];
+    psp_vfpu_regs(0x1C, 4, d);
+    for (int i = 0; i < 4; i++) combined[i] = psp_cpu.v[d[i]];
+
+    /* A * (B * x) */
+    psp_vtfm(0x00, 0x10, 0x18, 4);        /* matrix 0 */
+    psp_vtfm(0x04, 0x08, 0x00, 4);        /* matrix 1 */
+    psp_vfpu_regs(0x04, 4, d);
+    for (int i = 0; i < 4; i++)
+        CHECK_F(psp_cpu.v[d[i]], combined[i],
+                "vmmul and vtfm agree: (A*B)x == A(Bx)");
+}
+
 int main(void) {
     if (psp_mem_init() != 0) { printf("memory init failed\n"); return 1; }
     psp_cpu_reset();
@@ -221,6 +353,8 @@ int main(void) {
     test_arithmetic();
     test_prefix_traps();
     test_compare();
+    test_matrix_ops();
+    test_matrix_transform();
 
     psp_mem_free();
 

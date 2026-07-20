@@ -389,6 +389,12 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     }
 
     /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
+    case A_VMMUL:
+        fprintf(f, "%spsp_vmmul(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VTFM2: case A_VTFM3: case A_VTFM4:
+        fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VMSCL:
+        fprintf(f, "%spsp_vmscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VMIDT:
         fprintf(f, "%spsp_vmidt(%u, %u);\n", ind, in->vd, in->vsize); return;
     case A_VMZERO:

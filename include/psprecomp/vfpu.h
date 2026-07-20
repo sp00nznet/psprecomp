@@ -86,6 +86,12 @@ void psp_vmzero(uint32_t vd, int size);
 void psp_vmone(uint32_t vd, int size);
 void psp_vmmov(uint32_t vd, uint32_t vs, int size);
 
+/* Matrix multiply, transform and scale. See the note in vfpu.c: the operand
+ * orientation of vmmul is not independently verified. */
+void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+
 /* Prefix state. Set by vpfxs/vpfxt/vpfxd; consumed (and cleared) by the next
  * arithmetic instruction. While any is pending, arithmetic traps. */
 void psp_vfpu_set_prefix(int which, uint32_t value);

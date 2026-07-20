@@ -217,8 +217,31 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
  * ops use keeps the two consistent -- which matters because a game builds a
  * matrix with these and then transforms with vtfm. */
 static void matrix_cols(uint32_t vd, int size, int cols[4][4]) {
+    /* Build a fresh vector register per column: matrix, column index, row 0.
+     * An earlier version modified bits 6:5 of the incoming register, which
+     * varies the *row* field and so walked rows while claiming to walk
+     * columns -- every matrix op addressed the wrong elements. */
+    const uint32_t mtx       = (vd >> 2) & 7;
+    const uint32_t transpose = (vd >> 5) & 1;
+    for (int c = 0; c < size; c++) {
+        uint32_t vreg = (mtx << 2) | (uint32_t)c | (transpose << 5);
+        psp_vfpu_regs(vreg, size, cols[c]);
+    }
+}
+
+/* Read a whole matrix out into [col][row] order. */
+static void matrix_read(uint32_t v, int size, float m[4][4]) {
+    int cols[4][4];
+    matrix_cols(v, size, cols);
     for (int c = 0; c < size; c++)
-        psp_vfpu_regs((vd & ~0x60u) | ((uint32_t)c << 5), size, cols[c]);
+        for (int r = 0; r < size; r++) m[c][r] = psp_cpu.v[cols[c][r]];
+}
+
+static void matrix_write(uint32_t v, int size, const float m[4][4]) {
+    int cols[4][4];
+    matrix_cols(v, size, cols);
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++) psp_cpu.v[cols[c][r]] = m[c][r];
 }
 
 void psp_vmidt(uint32_t vd, int size) {
@@ -256,6 +279,73 @@ void psp_vmmov(uint32_t vd, uint32_t vs, int size) {
         for (int r = 0; r < size; r++) tmp[c][r] = psp_cpu.v[sc[c][r]];
     for (int c = 0; c < size; c++)
         for (int r = 0; r < size; r++) psp_cpu.v[dc[c][r]] = tmp[c][r];
+}
+
+/* ---- matrix multiply and transform --------------------------------------- */
+
+/* Scale every element of a matrix by a scalar. Orientation-independent, so
+ * this one is unambiguous. */
+void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vmscl")) return;
+    float m[4][4];
+    int t[4];
+    matrix_read(vs, size, m);
+    psp_vfpu_regs(vt, 1, t);
+    const float k = psp_cpu.v[t[0]];
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++) m[c][r] *= k;
+    matrix_write(vd, size, m);
+}
+
+/* Transform a vector by a matrix: vd[r] = sum over c of M[c][r] * v[c].
+ *
+ * This is the column-major product a graphics pipeline wants -- the matrix
+ * columns are the transformed basis vectors, so transforming (1,0,0,0) yields
+ * column 0. That property is what the test pins, and it is the one that
+ * distinguishes this from its transpose. */
+void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vtfm")) return;
+    float m[4][4];
+    int d[4], t[4];
+    matrix_read(vs, size, m);
+    psp_vfpu_regs(vt, size, t);
+    psp_vfpu_regs(vd, size, d);
+
+    float in[4], out[4];
+    for (int i = 0; i < size; i++) in[i] = psp_cpu.v[t[i]];
+    for (int r = 0; r < size; r++) {
+        float sum = 0.0f;
+        for (int c = 0; c < size; c++) sum += m[c][r] * in[c];
+        out[r] = sum;
+    }
+    /* vd may be one of the sources, so write only after the whole result is
+     * computed. */
+    for (int r = 0; r < size; r++) psp_cpu.v[d[r]] = out[r];
+}
+
+/* Matrix product, composed from the same transform used above so the two
+ * cannot disagree: each column of the result is a column of vt transformed by
+ * vs.
+ *
+ * NOTE: the operand ORIENTATION here is not independently verified. The maths
+ * is right for the convention stated above, and the identity/composition tests
+ * hold, but those hold for the transposed convention too -- they cannot tell
+ * the two apart. If recompiled geometry comes out scrambled rather than
+ * absent, this is the first thing to check against an oracle. Recorded rather
+ * than glossed, because a wrong orientation produces plausible output. */
+void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vmmul")) return;
+    float a[4][4], b[4][4], out[4][4];
+    matrix_read(vs, size, a);
+    matrix_read(vt, size, b);
+
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++) {
+            float sum = 0.0f;
+            for (int k = 0; k < size; k++) sum += a[k][r] * b[c][k];
+            out[c][r] = sum;
+        }
+    matrix_write(vd, size, out);
 }
 
 /* Compare, writing one condition bit per lane plus the any/all summary bits
