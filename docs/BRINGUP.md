@@ -2183,3 +2183,51 @@ orphan with live code in it -- and asking what could reach it.
    structure whose constructor is in a table not yet run.
 3. This belongs in the module loader, not the host: a PRX''s constructor tables
    should be walked at load time.
+
+## The new stall is inside the tier that now runs
+
+`0x00067E58` is a loop *target*, not a call site -- `PSP_LOOP` records branch
+destinations, and a backward branch lands here:
+
+```
+00067E4C  beql $s1, $v0, 0x00067EA0    ; s1 reached s0+184 -> exit
+00067E54  addu $a0, $s3, $zero
+00067E58  jal  0x000122B4              ; string compare(s3, s1+12)
+00067E5C  addiu $a1, $s1, 12
+```
+
+A name-lookup loop walking a list of records, comparing a string against each
+entry''s `+12` field. It is inside `0x00067E34` -- the seventeen-element
+constructor tier that this document spent many sections establishing "never
+runs". **It runs now.** Static constructors were what stood between execution
+and this code.
+
+So the failure has moved from "a list that was never created" to "a lookup that
+never finds its entry and never terminates" -- one level up the same subsystem,
+and a different kind of bug.
+
+## Where the session ends
+
+`pixels written: 0`. WTF does not render.
+
+But the blocker is no longer the one that dominated this document. Both
+searches that ran the longest -- the self-looping chain walk and the unbuilt
+constructor tier -- are resolved by a single cause, and the program now
+executes into code it had never reached.
+
+### The fix that matters, and where it belongs
+
+Running the constructor table from the host is bring-up scaffolding. It belongs
+in the module loader: **a PRX''s static-constructor array must be walked at load
+time**, the way the real loader''s crt0 does. That is a small, well-defined piece
+of work and it is the first thing to do next.
+
+### Resume here
+
+1. Move constructor-table handling into the loader; find the array by scanning
+   for a null-terminated run of code pointers, or from section headers if the
+   module has them.
+2. `0x00067E58`: read what the lookup is searching for and why it misses.
+   `0x000122B4` is the comparison; `$s3` is the sought name.
+3. Re-run the theories falsified before the `$ra` fix -- that fix invalidated an
+   era of this document''s conclusions, and one has already been overturned.
