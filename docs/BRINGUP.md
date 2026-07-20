@@ -1870,3 +1870,57 @@ something branches away from construction. With label marking in place this is
 directly attackable: mark-check the branches between `0x0007EAE8` (never runs)
 and `0x000743F0` (runs), and find the first point where the executed path
 leaves the path that would have constructed.
+
+---
+
+# The causality was backwards
+
+Reachability, measured with label marking:
+
+```
+0x00018318  REACHED        <- start-up function
+0x0001835C  never reached  <- 17 instructions later, same function
+```
+
+Those are not two functions. They are consecutive statements:
+
+```
+00018354  jal 0x000742A8       ; REACHED -- and never returns
+00018358  addu $a2, $s0, $zero
+0001835C  jal 0x00072FC4       ; never reached
+00018364  jal 0x00074AA4       ; never reached -> the construction tier
+```
+
+`0x000742A8` is entered at `0x00018354` and **never returns**, because the hang
+at `0x0004DD14` is inside its subtree. Everything after that call -- including
+`0x00074AA4`, the root of the seventeen-constructor tier -- is unreachable for
+the ordinary reason that the program stopped.
+
+**So "the construction tier never runs" is a consequence of the hang, not its
+cause.** The model driving many sections of this document had it exactly
+backwards: the constructors were never skipped, they were simply scheduled
+after a call that never came back.
+
+That also dissolves the "sharp contradiction" recorded earlier -- that the
+dispatcher runs while its constructors do not. There is no contradiction. The
+dispatcher runs first, on objects not yet built, because in this program it is
+*supposed* to run before them: the seventeen null vtables at `0x00066C78` are
+the normal state at that point in start-up, not evidence of failure.
+
+## What the remaining question actually is
+
+Only one thing needs explaining: **why does the chain walk at `0x0004DD14`
+self-loop?** Everything else in this document is either downstream of that or
+was a misreading of it.
+
+Recall what is known about it, and note that it now needs re-examining without
+the assumption that its table *should* have been initialised:
+
+- Terminator is `$t2 = 1`, set at `0x0004DCFC`.
+- The table''s next-fields are `0`, so entry 0 points at itself.
+- Patching that self-loop at run time advances execution to a second table with
+  the same shape at `0x00067E58`.
+
+If a zeroed table is the legitimate start state, then the walk is meant to stop
+some other way and the recompiled code is getting a condition wrong -- which
+puts the fault back in codegen, where `$ra` already proved one bug lives.
