@@ -456,8 +456,13 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
      * the entry map makes the second sighting a no-op — so no membership test
      * is done here, which keeps this O(n) rather than O(n^2). */
     if (an->scan_calls) {
-        for (uint32_t off = 0; off + 4 <= an->size; off += 4) {
-            uint32_t a = an->base + off;
+        /* Restricted to the scan range -- see the note in analyze.h. Falls back
+         * to the whole extent if the caller did not set one. */
+        uint32_t sbase = an->scan_size ? an->scan_base : an->base;
+        uint32_t ssize = an->scan_size ? an->scan_size : an->size;
+        for (uint32_t off = 0; off + 4 <= ssize; off += 4) {
+            uint32_t a = sbase + off;
+            if (!a_in_range(an, a)) continue;
             a_insn in;
             a_decode(fetch(an, a), a, &in);
             if (in.op != A_JAL || !in.has_target) continue;

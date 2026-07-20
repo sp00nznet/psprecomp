@@ -471,9 +471,21 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
     }
 
     memset(an, 0, sizeof *an);
-    an->code = b->data + e->text_offset;
-    an->base = e->text_addr;
-    an->size = e->text_size;
+    /* Walk the whole loaded image, not just .text: a module can place
+     * executable code outside it (C++ static initialisers, notably), and
+     * restricting the extent to .text makes that code invisible. The linear
+     * jal harvest stays confined to .text via scan_base/scan_size. */
+    if (e->nsegments) {
+        an->code = b->data + e->seg[0].offset;
+        an->base = e->seg[0].addr;
+        an->size = e->seg[0].filesz;
+    } else {
+        an->code = b->data + e->text_offset;
+        an->base = e->text_addr;
+        an->size = e->text_size;
+    }
+    an->scan_base = e->text_addr;
+    an->scan_size = e->text_size;
     an->stub_addr = e->stub_addr;
     an->stub_size = e->stub_size;
     an->scan_calls = 1;

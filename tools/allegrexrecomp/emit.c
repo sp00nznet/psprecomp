@@ -516,6 +516,20 @@ static void emit_function(ectx *c, const a_func *fn) {
     /* Compiles away unless the generated code is built with PSPRECOMP_TRACE. */
     fprintf(f, "    PSP_ENTER(0x%08Xu);\n", fn->addr);
 
+    /* A function's instructions do not always begin at its entry: a backward
+     * jump can pull in a block that lies *below* the entry address, and
+     * emission walks the whole owned range in address order. When that
+     * happens the first statement in the body is not the first statement to
+     * execute, so control has to be sent to the real entry explicitly.
+     *
+     * Without this, calling the function silently runs whatever happens to sit
+     * lowest in its address range -- with none of the entry's setup having
+     * run. Registers hold stale values and the damage surfaces far away. */
+    if (fn->start != fn->addr) {
+        c->is_label[widx(an, fn->addr)] = 1;
+        fprintf(f, "    goto L_%08X;\n", fn->addr);
+    }
+
     for (uint32_t a = fn->start; a < fn->end; a += 4) {
         if (!owned_by(an, a, owner)) continue;
         uint32_t i = widx(an, a);

@@ -1,6 +1,7 @@
 /* allegrexrecomp — container parsing. See container.h. */
 
 #include "container.h"
+#include "decode.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -473,6 +474,44 @@ int psp_collect_imports(const uint8_t *d, size_t len,
     return found;
 }
 
+/* Is `target` plausibly the entry of a function?
+ *
+ * Inside `.text` the answer is simply yes -- that is what the section is for.
+ * Outside it, the bar has to be higher, because most words in `.data` are not
+ * code and a relocation pointing at one is usually just a data pointer.
+ *
+ * The test is that several consecutive words all decode as valid Allegrex
+ * instructions. A first attempt used the standard prologue
+ * `addiu $sp, $sp, -N` instead, which found only four of this module's eight
+ * static initialisers: the others are *leaf* functions that never touch the
+ * stack, so they begin with ordinary arithmetic and the prologue test rejected
+ * them. Requiring a run of decodable instructions covers both, and is still
+ * strict enough that arbitrary data rarely passes -- especially given the
+ * candidate already had to be a relocation target pointing into the image. */
+#define CODE_PROBE 6
+
+static int looks_like_code(const uint8_t *d, size_t len, const elf_info *e,
+                           uint32_t load_bias, uint32_t target,
+                           uint32_t text_lo, uint32_t text_hi) {
+    if (target >= text_lo && target < text_hi) return 1;
+
+    if (!e->nsegments) return 0;
+    const uint32_t lo = e->seg[0].addr;
+    const uint32_t hi = lo + e->seg[0].filesz;
+    if (target < lo || target + CODE_PROBE * 4 > hi) return 0;
+
+    size_t at = (uint32_t)(target + load_bias);
+    if (at + CODE_PROBE * 4 > len) return 0;
+
+    for (int i = 0; i < CODE_PROBE; i++) {
+        a_insn in;
+        uint32_t w = rd32(d + at + (size_t)i * 4);
+        if (!a_decode(w, target + (uint32_t)i * 4, &in) || in.op == A_INVALID)
+            return 0;
+    }
+    return 1;
+}
+
 int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
                               uint32_t load_bias, uint32_t *out, int max) {
     if (!e->shoff || !e->shnum || !e->text_size) return 0;
@@ -541,8 +580,9 @@ int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
             if (at + 4 > len) continue;
 
             uint32_t target = rd32(d + at);
-            if (target < text_lo || target >= text_hi) continue;
             if (target & 3) continue;            /* not instruction-aligned */
+            if (!looks_like_code(d, len, e, load_bias, target, text_lo, text_hi))
+                continue;
 
             if (found < max) out[found] = target;
             found++;

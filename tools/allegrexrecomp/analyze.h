@@ -70,6 +70,18 @@ typedef struct {
      * counts separately. */
     int scan_calls;
 
+    /* The linear `jal` harvest runs over this sub-range only, normally `.text`.
+     *
+     * The walkable extent (`base`/`size` above) covers the whole loaded image,
+     * because a module can and does place executable code outside `.text` --
+     * C++ static initialisers in particular. But scanning all of `.data` for
+     * `jal` patterns would manufacture thousands of false seeds out of data
+     * that happens to decode. Walking widely and scanning narrowly gets both:
+     * control flow may lead anywhere, while the brute-force harvest stays
+     * where instructions are known to live. */
+    uint32_t scan_base;
+    uint32_t scan_size;
+
     /* The whole loaded module image, not just .text. Jump tables live in
      * .rodata or .data, so resolving a computed jump means reading outside the
      * code extent. Optional: without it, tables are simply not resolved. */
