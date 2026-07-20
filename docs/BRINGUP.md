@@ -2719,3 +2719,65 @@ the same routine was meant to loop and does not.
 That is a much smaller question than any previously open in this document, and
 it has a direct measurement: watch writes to record 2''s head (`0x0030B884`) and
 record 1''s (`0x0030B12C`) and compare who writes one but not the other.
+
+## Skipping unbuilt records is not viable — and the chain closes
+
+Shimming the guard to treat unconstructed records as empty (zeroing the count
+when the head does not point inside the record) moves the stall but destroys
+the run:
+
+```
+last loop back-edge  0x00041294 (35.8M hits, was 2.5B at 0x00067E58)
+calls dispatched     20,000,000  (budget exhausted)
+dispatch misses      19,999,920
+bad memory accesses  364,919,061
+```
+
+Execution goes wild. So those records are genuinely needed -- their absence is
+not cosmetic, and no shim substitutes for building them. A clean negative.
+
+## What builds a record, and why it never happens
+
+`0x00068360` writes record 1''s list head; it is the per-record constructor.
+Its four callers:
+
+```
+0x0006662C  REACHED
+0x00065D34  REACHED
+0x00073CB0  never reached  -- and has NO callers anywhere
+0x00073DA4  never reached  -- and has NO callers anywhere
+```
+
+Two orphans. Same signature as `0x003B2B40`, which turned out to be reachable
+only through the static-constructor table -- these are reachable only through a
+**vtable**.
+
+Which closes the loop on something recorded early and set aside as
+"downstream": the seventeen null virtual dispatches at `0x00066C78`.
+
+```
+00066C6C  lw   $t9, 12($s1)     ; vptr
+00066C70  lw   $t9, 12($t9)     ; slot 3
+00066C74  jalr $ra, $t9         ; 17 times, stride 1880
+```
+
+That loop is calling **slot 3 on each of the seventeen records** -- and slot 3
+is the record constructor. Every vptr is null, so every construction call goes
+to address 0, so sixteen records stay unbuilt, so the later lookup walks
+garbage and spins.
+
+The full chain, now end to end:
+
+```
+sub-object vptrs never installed
+  -> 0x00066C78 dispatches slot 3 to address 0, seventeen times
+  -> records 2..17 never constructed
+  -> record 3 reads a non-zero count from file data, defeating the guard
+  -> 0x00067E58 walks a garbage list head and spins
+```
+
+**The remaining question is exactly the one this document opened with**: what
+installs the vptrs on these seventeen sub-objects? Static constructors built
+record 1 and whatever owns it; they do not reach these. The answer is a
+constructor pass over the array -- and its entry point is one of the two
+orphans above, reachable only once a vptr exists to dispatch through.
