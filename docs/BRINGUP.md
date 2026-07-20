@@ -1112,3 +1112,45 @@ it?
    guard, and that guard's condition is the bug.
 2. This is a mechanical walk now, not a search. Each step is a watch and a run,
    and the answer is a yes or no rather than an inference.
+
+## Walking up: the whole constructor family is dead code at run time
+
+```
+0x00067E34  NEVER RAN     (the 17 x 1880 constructor loop)
+0x00067E08  NEVER RAN     (its only real entry point)
+0x00066DB4  NEVER RAN     (one of 0x00067E08's callers)
+```
+
+`0x00067E08`'s callers are `0x00066DB4`, `0x00067038`, `0x00067258`,
+`0x00067478`, `0x00067598` -- spaced roughly 0x220 apart, a run of near-identical
+functions. That spacing, and the count, matches the seventeen subsystems: these
+are the per-subsystem constructors, and each funnels into the shared
+`0x00067E08` helper.
+
+None of them execute.
+
+## The sharp contradiction
+
+`0x00066C34` -- the function that *dispatches* to all seventeen -- **does** run.
+Its wrapper `0x0007EAE8` runs. The sub-object constructors do not.
+
+So the program reaches the code that uses these objects without ever reaching
+the code that builds them. That is not a subtle initialisation-order problem;
+an entire tier of construction is being skipped while its consumer executes
+normally.
+
+Two readings, and they are distinguishable by measurement rather than argument:
+
+1. **A separate construction pass exists and is never called.** Something at
+   startup should invoke the seventeen constructors before anything dispatches
+   to them; that call site is missing or unreached.
+2. **`0x00066C34` is not the parent constructor.** It may be an `init` method
+   that legitimately assumes prior construction, with the real constructor
+   elsewhere -- in which case the break is further up still.
+
+## Next
+
+Find the callers of `0x00066DB4` and the other four siblings and walk up until
+reaching a function that *does* run. The boundary between "runs" and "never
+runs" is where the break is, and each step is a single watch and a single run
+with a yes/no answer.
