@@ -974,3 +974,55 @@ different address.
 The `lui`/`addiu`/`sw ..., 0($a0)` signature is distinctive enough to grep the
 disassembly for directly, which is a far better search than following call
 chains by hand.
+
+## Every stride-1880 site in the module
+
+Searching the image directly for `addiu rt, rs, 1880` (opcode 9, immediate
+0x758) -- 14 sites, the whole candidate set, found in one pass:
+
+```
+0x00066C88  26310758   addiu $s1, $s1, 1880   <- the failing dispatch loop
+0x00066CE8  26310758
+0x00066D5C  24020758
+0x00066D84  24840758
+0x00067884  26100758   addiu $s0, $s0, 1880   <- loop stride
+0x00067A90  24020758
+0x00067A94  24020758
+0x00067AA8  24020758
+0x00067AD0  24630758
+0x00067F70  26100758   addiu $s0, $s0, 1880   <- loop stride
+0x00067F7C  24020758
+0x00073274  24060758
+0x00073804  24060758
+```
+
+Only three advance a register by the stride in place (`$s1`/`$s0`), the mark of
+a loop induction variable: the known-broken one at `0x00066C88`, and two
+candidates at **`0x00067884`** and **`0x00067F70`**.
+
+## 0x00067884 is inside a path both callers skip
+
+`0x00067884` is the fall-through of `0x00067844` when its second argument is
+*non-zero*:
+
+```
+00067854  addu $s1, $a1, $zero
+00067858  beq  $s1, $zero, 0x00067878   ; a1 == 0 -> skip the loop entirely
+00067868  jal  0x000122B4               ; compare a1 against a string constant
+0006786C  addiu $a1, $a1, -1204         ; ...at 0x3B0000-1204
+00067870  bnel $v0, $zero, 0x00067884   ; mismatch -> into the stride loop
+```
+
+`$a1` is a **string**: it is compared against a constant in the file image.
+And both known call sites pass `a1 = 0` -- `0x00066C5C` and `0x0007EB08` -- so
+both skip it.
+
+That may well be correct behaviour rather than a bug; a name-matching path that
+takes NULL to mean "default" is ordinary. It does mean this function is not the
+missing constructor pass on these call paths.
+
+## Next
+
+`0x00067F70` is the remaining stride-loop candidate and has not been read yet.
+Read it first: if it constructs elements of the array, find who calls it and
+whether that caller runs.
