@@ -3738,3 +3738,43 @@ each function it calls, narrowing until the clobbering callee is identified by
 measurement rather than by reading emitted code. That is the same
 bisect-by-measurement that found the constructor-tier boundary in one pass
 after inference had failed for several rounds.
+
+---
+
+# The stack pointer leaks
+
+Measuring `$sp` and `$s1` at each entry to the allocator, from inside the
+five-iteration loop that calls it:
+
+```
+call 1:  sp=0x09FFFB60  s1=0x003FD060   (correct)
+call 2:  sp=0x09FFFB30  s1=0x0000E154   (already wrong)
+```
+
+**`$sp` is 48 bytes lower on the second call and never came back.** Some callee
+in between decremented the stack pointer and did not restore it.
+
+That explains the `$s1` clobber completely, and without any appeal to a missing
+epilogue: every callee-saved register is restored by reading `sp + <offset>`.
+If `$sp` is not what it was at the matching prologue, the restore reads a
+*different stack slot* -- so a function can execute its epilogue perfectly and
+still load garbage. `$s1` was not failing to be restored; it was being restored
+from the wrong address.
+
+This also subsumes the earlier withdrawn reading: the emitted epilogues are
+faithful, exactly as they appeared to be. The fault is one level down, in `$sp`
+itself.
+
+48 bytes is a specific frame size, and the loop body calls a small number of
+functions -- `0x00000914` opens with `addiu $sp, $sp, -32`, so it is not the
+only candidate. The next measurement is `$sp` at entry and exit of each
+function the loop calls; the one whose exit `$sp` differs from its entry `$sp`
+is the bug.
+
+## Why this is the right kind of finding
+
+Every symptom this document has chased -- garbage pointers, unconstructed
+objects, null vtables, self-looping lists -- is what a shifting stack frame
+produces: values restored from adjacent slots, plausible and wrong. It is the
+same signature as the two calling-convention faults already fixed, and it is
+measured with two register reads rather than inferred from emitted code.
