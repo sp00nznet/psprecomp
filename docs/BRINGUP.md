@@ -1720,3 +1720,43 @@ Watch `0x0000DD24` (`_getmodreent`) and read `$v0` on return. It is a real
 entry, so the watch will fire. Three outcomes, all informative: it returns the
 stack address (the fallback is broken), it returns the TCB reent and something
 overwrites `a0` in between, or it is not the function feeding this call at all.
+
+---
+
+# A falsification made under broken codegen was wrong
+
+The "no reent structure" message is a **string in the game''s own image** (file
+`0x0944B1`), not something psprecomp prints. It was read for most of this
+investigation as our diagnostic; it is the game''s libc reporting that it could
+not find its reent.
+
+Re-running the long-falsified ModuleMgr hypothesis, now that `jal` assigns
+`$ra`:
+
+```
+                        before        after returning a module id
+game''s reent message    printed       gone
+bad memory accesses     3             0
+```
+
+The original test concluded "byte-identical output, so this call is not on that
+path". **That test ran while every non-leaf function in the program returned
+through a stale `$ra`.** A falsification obtained under broken codegen is not a
+falsification, and this one was wrong.
+
+That matters beyond this one call: every theory in this document falsified
+*before* the `$ra` fix was tested against a program whose calls did not return
+correctly. The VFPU-garbage and lost-structure-writes results were both from
+that era. They are now unreliable and should be re-run before being trusted.
+
+Returning an id is also the truthful answer, not a convenient one. The question
+is "which module owns this address"; a self-contained microgame is exactly one
+module; the host has loaded it. `UNKNOWN_MODULE` denies a module that
+demonstrably exists.
+
+## Still unresolved
+
+The hang is unchanged: `0x0004DD14`, ten billion iterations, `pixels written: 0`.
+The allocator still receives `0x09FFFC20` as its reent. So the reent lookup now
+succeeds while the allocation still fails -- which means the reent it finds is
+not one with a usable arena, and the next question is what populates *that*.
