@@ -1924,3 +1924,44 @@ the assumption that its table *should* have been initialised:
 If a zeroed table is the legitimate start state, then the walk is meant to stop
 some other way and the recompiled code is getting a condition wrong -- which
 puts the fault back in codegen, where `$ra` already proved one bug lives.
+
+## The codegen hypothesis is dead: the emitted loop is correct
+
+```c
+    /* 0004DD44  bnel  $v0, $t2, 0x0004DD14 */
+    if (r_v0 != r_t2) {
+    /* 0004DD48  sll   $a2, $v0, 4 */
+        r_a2 = psp_sll(r_v0, 4);
+        goto L_0004DD14;
+    }
+```
+
+`bnel` nullifies its delay slot when not taken -- emitted exactly right. The
+`bne` forms above it evaluate the condition *before* the slot, also right. There
+is no codegen fault in this loop.
+
+Trace it by hand with a zeroed table: `$t1 = 0x04153FFF`, entry 0''s key is 0,
+they differ, `$t3` stays 0, `lhu $v0, 16($t0)` reads 0, `0 != 1` so the branch
+is taken, `$a2 = 0 << 4 = 0`, and the walk returns to entry 0. **Real hardware
+would spin here too.**
+
+That is the useful conclusion: the loop is not wrong, and a zeroed table is not
+its legitimate start state. The table at `0x003EC384` genuinely must be
+initialised -- with `next = 1` in at least entry 0 -- *before* this walk, by
+something on the path that already executes.
+
+## Where this leaves it
+
+One question, well-posed and no longer entangled with anything else:
+
+**What writes the sentinel into the table at `0x003EC384`, and why has it not
+run by the time `0x0004DD14` walks it?**
+
+Note it is reached via `0x0004DA58`, which loads its sentinel differently --
+`lhu $t2, 24($a0)` rather than the constant 1 at `0x0004DCFC`. Two callers with
+two notions of the terminator is worth checking directly: if the table was
+built for the `+24` sentinel (which reads 0) and is being walked by the code
+that expects 1, the table is fine and the *caller* is wrong.
+
+That is a concrete, cheap next measurement and it does not depend on any of the
+models this document went through.
