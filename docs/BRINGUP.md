@@ -3472,3 +3472,61 @@ a structure whose pointer field overlaps code.
 
 All three cluster in `0x00012328`-`0x000123C4`, one small region, and they
 appear only now that execution gets this far. That is the next thing to read.
+
+### The bad pointers go to strcpy and strlen
+
+```
+000123A4  lbu $v0, 0($a1) / sb $v0, 0($v1) / bne  -> strcpy
+000123C4  lbu $v1, 0($a0) / bne                   -> strlen
+```
+
+So a **string pointer** is wrong, not a structure pointer: something passes a
+`char *` of `0x8E420004` -- an instruction encoding -- to `strcpy`/`strlen`.
+The pointer was loaded from a location holding code, so either a string-pointer
+field is being read at the wrong offset, or the object it is read from is
+itself misplaced.
+
+This surfaced only after the allocation fix let execution reach here, so it is
+newly-exposed rather than newly-broken. Twenty-three occurrences, one small
+region, and both callees now identified -- the caller of `strcpy` is where to
+look, and the argument is `$a1`.
+
+# Session summary
+
+`pixels written: 0`. WTF does not render.
+
+## The two fixes that mattered
+
+Both were **calling-convention details producing plausible values rather than
+visible failures**, which is why each survived so long:
+
+1. **`$ra` was never assigned by `jal`/`jalr`.** Two assignments existed across
+   137,748 instructions; there are now 9,814. Every non-leaf function in the
+   program was returning through a stale register.
+2. **`psp_arg` read arguments 5-8 from the stack.** PSP firmware passes them in
+   `$t0`-`$t3`. The wrong read turned a valid 4096-byte alignment into
+   `0x3AC85C`, so a correct 15.9 MB allocation was rejected as `ILLEGAL_ATTR`
+   -- and every symptom chased in this document descended from that.
+
+After the second fix: heap established (15.9 MB), the ten-billion-iteration
+spin gone, dispatch misses 19 -> 1, and the real alignment check restored
+rather than shimmed.
+
+## Also shipped
+
+Static-constructor discovery and execution (`src/ctors.c`, ten tests) --
+a PRX gets its crt0 from the loader, so nothing was walking the table.
+Traceable import stubs. `psp_hle_register_unnamed`, making "observed but
+unidentified" representable instead of forcing an invented name. A tested
+rasterizer. Total dispatch reachability (13,682 entries). Bad accesses 28 -> 0.
+Four VFPU ops and a decoder fix. Coverage reporting corrected from 14% to 92%.
+
+## What to distrust
+
+Every theory falsified *before* the `$ra` fix was tested against a program
+whose calls did not return correctly; one has already been overturned by
+re-running it. And four separate conclusions in this document came from
+instrumentation that could not observe what it claimed to measure -- a watch on
+a non-entry address, a mark that says "reached" without saying how, a grep for
+a log line untraceable stubs could never emit, and a `printf` placed after an
+early return. Verify the instrument before trusting the negative.
