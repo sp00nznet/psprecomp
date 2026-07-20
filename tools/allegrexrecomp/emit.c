@@ -859,8 +859,12 @@ static void emit_imports(FILE *f, const a_analysis *an, const emit_opts *o) {
         const psp_import_entry *e = import_at(o, addr);
         if (e) {
             fprintf(f, "/* %s :: NID 0x%08X */\n", e->lib, e->nid);
-            fprintf(f, "void psp_import_%08X(void) { psp_hle_call(0x%08Xu); }\n\n",
-                    addr, e->nid);
+            /* Trace import calls like any other function. A firmware call that
+             * never happens is indistinguishable from one that happens and
+             * does nothing, and untraceable stubs made a heap allocation
+             * that never reached the kernel impossible to diagnose. */
+            fprintf(f, "void psp_import_%08X(void) { PSP_ENTER(0x%08Xu); psp_hle_call(0x%08Xu); }\n\n",
+                    addr, addr, e->nid);
         } else {
             /* The thunk is called but does not appear in the import table --
              * so we cannot name it or dispatch it. Trapping is the only honest

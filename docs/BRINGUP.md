@@ -3149,3 +3149,38 @@ evidently not the *only* thing gating the allocation, since supplying it did
 not produce a kernel call. The next step is to make import calls observable and
 then re-read this path -- guessing further without that is how the last several
 wrong turns happened.
+
+## Import stubs are now traceable, and the stub *is* reached
+
+Generated import thunks now carry `PSP_ENTER`, so a firmware call can be
+watched like any other function -- previously impossible, and the reason a heap
+allocation that never reached the kernel could not be diagnosed.
+
+With the heap-size word supplied, watching the stub directly:
+
+```
+STUB REACHED: AllocPartitionMemory part=2 size=15976448
+STUB REACHED: AllocPartitionMemory part=2 size=15976448
+...
+```
+
+**The game does reach `sceKernelAllocPartitionMemory`**, asking partition 2 for
+15,976,448 bytes -- about 15.2 MB, against 20.8 MB free. So the earlier
+conclusion "the kernel allocator is never called" was an artefact of grepping
+for a log line that untraceable stubs could never produce.
+
+Yet `user memory free` stays at 20,840,448 for the whole run, and the
+instrumentation inside `hle_AllocPartitionMemory` never prints. The stub is
+entered; the handler does not appear to run; nothing reports an unimplemented
+NID either.
+
+That is a narrow, three-way question -- the NID lookup, the handler, or a stale
+build -- and it is the first point in this chain that lies wholly inside
+psprecomp, with both ends observable.
+
+### Why this took so long to become visible
+
+Every earlier statement about this call rested on the absence of a log line.
+Absence of evidence from a mechanism that *cannot* produce evidence is not
+evidence, and that pattern has now cost this investigation four separate wrong
+conclusions. Making import stubs traceable removes the blind spot permanently.
