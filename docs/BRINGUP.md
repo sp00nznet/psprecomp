@@ -3668,3 +3668,33 @@ verify systematically rather than case by case.
 Compare `psp_body_0000E06C`''s emitted exits against the original''s epilogue at
 every `return`. Any path that returns without the `lw $s1, 4($sp)` sequence is
 the bug.
+
+### The allocator restores; its callee does not
+
+`psp_body_0000E06C` is correct -- it emits `r_s1 = psp_read32(r_sp + 4);`
+before its `return`. So the clobber is deeper, in `0x0000E0AC`, which saves
+`$s1` at `sp+4` in its own prologue and has:
+
+```
+returns:                8
+restores of $s1:        2
+tail calls / fall-throughs: 14
+```
+
+Eight exits and two restores. Not proof on its own -- this function is split
+across bodies, so a `return` after `psp_func_X()` is legitimate when the callee
+carries the epilogue -- but six exits with no visible restore, in exactly the
+function measured to clobber `$s1`, is a strong and checkable lead.
+
+`0x0000E588` also lies in this function''s range and is the one remaining
+dispatch miss, with no label emitted. An unmodelled edge and a missing restore
+in the same split function are plausibly one defect: a control-flow path the
+walk never took, whose exit therefore never got its epilogue.
+
+### To settle it
+
+For each of the eight returns, check whether the path reaching it passes
+through the original''s `lw $s1, 4($sp)`. The ones that do not are the bug. If
+they correspond to edges discovery missed -- `0x0000E588` among them -- then
+the fix is in discovery, not in emission, and the every-label-dispatchable
+guarantee needs extending to cover computed targets that were never labelled.
