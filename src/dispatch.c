@@ -110,6 +110,12 @@ void psp_trace_enter(uint32_t addr) {
 
 void psp_trace_reset(void) { g_trace_n = 0; }
 
+/* The most recent traced function entry -- who was running when something else
+ * went wrong. */
+uint32_t psp_trace_last(void) {
+    return g_trace_n ? g_trace[(g_trace_n - 1) % TRACE_DEPTH] : 0;
+}
+
 void psp_trace_dump(void) {
     if (!g_trace_n) {
         fprintf(stderr, "  (no function trace -- build the generated code with "

@@ -1,11 +1,23 @@
 /* psprecomp — PSP memory map. See include/psprecomp/mem.h. */
 
 #include "psprecomp/mem.h"
+#include "psprecomp/dispatch.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 
 psp_memory psp_mem;
 uint64_t   psp_mem_bad_access;
+
+/* Bad accesses were only ever counted, which says an initialiser went wrong
+ * without saying which one. The addresses are what identify it, and there are
+ * few enough of them (28 in the current run) to simply print. */
+static void bad_access(uint32_t addr, int write, int width) {
+    if (psp_mem_bad_access < 32)
+        fprintf(stderr, "psprecomp: bad %s%d at 0x%08X (last fn 0x%08X)\n",
+                write ? "write" : "read", width * 8, addr, psp_trace_last());
+    psp_mem_bad_access++;
+}
 
 int psp_mem_init(void) {
     psp_mem.ram     = (uint8_t *)calloc(1, PSP_RAM_SIZE);
@@ -74,7 +86,7 @@ void *psp_mem_ptr(uint32_t addr, uint32_t size) {
  * in a steady state — the counter is how you notice. */
 #define READ_BODY(TYPE)                              \
     void *p = psp_mem_ptr(addr, (uint32_t)sizeof(TYPE)); \
-    if (!p) { psp_mem_bad_access++; return 0; }      \
+    if (!p) { bad_access(addr, 0, (int)sizeof(TYPE)); return 0; }      \
     TYPE v;                                          \
     memcpy(&v, p, sizeof v);                         \
     return v;
@@ -86,7 +98,7 @@ float    psp_read_f32(uint32_t addr) { READ_BODY(float)  }
 
 #define WRITE_BODY(TYPE)                             \
     void *p = psp_mem_ptr(addr, (uint32_t)sizeof(TYPE)); \
-    if (!p) { psp_mem_bad_access++; return; }         \
+    if (!p) { bad_access(addr, 1, (int)sizeof(TYPE)); return; }         \
     memcpy(p, &val, sizeof(TYPE));
 
 void psp_write8 (uint32_t addr, uint8_t  val) { WRITE_BODY(uint8_t)  }

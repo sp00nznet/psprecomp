@@ -373,3 +373,44 @@ from a different angle.
    chain self-references or runs off the end says which write went missing.
 3. Only then go back to the GE. The 240 undecoded commands and `vtype == 0`
    are downstream of this: the game never gets far enough to submit geometry.
+
+---
+
+# Bad memory accesses: 28 to 3
+
+Logging the *address* of each bad access, plus the function that made it, took
+this from a bare count to a diagnosis in one run. The output clustered
+immediately:
+
+```
+bad write32 at 0x00833FE0 (last fn 0x000123A4)   ... 18 accesses, one structure
+bad write32 at 0x02336F68 (last fn 0x000473A4)   ... 7 accesses
+bad read32  at 0x0C0247C5 (last fn 0x0000F3C0)   ... 3, unaligned
+```
+
+The first two clusters sit just past the host's `MODULE_SIZE` of `0x00500000`,
+while the module's own `memsz` is only `0x004B0000`. That gap is the game's
+**internal heap**, which starts after `.bss` and grows — straight out of the
+mapping. Enlarging the module mapping to `0x03000000` drops bad accesses from
+**28 to 3**.
+
+The remaining three are a genuinely bad pointer: `0x0C0247C5` is unaligned and
+outside any mapped region. Unresolved.
+
+## This did not fix the hang
+
+Same stall, same `0x0004DD14`, same 470 function entries. Worth stating plainly:
+the structure writes that were being lost are *not* what feeds the unterminated
+chain walk. Fixing them was correct and necessary, and it was not sufficient.
+
+Two clean falsifications now — the VFPU-garbage theory and this one. Both cost
+one run each, and both removed a plausible explanation that would otherwise
+keep being re-proposed.
+
+## Next
+
+1. Dump the 16-byte table entries at the loop's `$a0` on entry. The chain either
+   self-references or runs past the end; which one it is names the bug. This is
+   the measurement that should have been taken before either of the two theories
+   above — both were reasoning about the binary rather than reading it.
+2. Chase the unaligned `0x0C0247C5` from `0x0000F3C0`.
