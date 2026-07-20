@@ -2607,3 +2607,30 @@ targets lie in `0x3B2AF8..0x3B2FCC`, a region above `.text` holding little
 else, because the compiler emits constructors together. Exactly one
 null-terminated array in the image points there. That is the property worth
 implementing, and the code comment now says so.
+
+## Locality narrows but does not decide
+
+Filtering null-terminated pointer runs by span (targets clustered relative to
+entry count) takes 1327 candidates down to **28**. A large improvement over the
+useless no-callers test, but not a decision: a vtable is also a tight cluster,
+because one class''s methods are emitted together too.
+
+So locality is a necessary property, not a sufficient one. Running the 28
+blind is not an option -- calling a vtable method with no arguments during
+start-up would corrupt state in a way that looks like anything but its cause,
+which is the precise failure this document exists to avoid repeating.
+
+The property that actually settled it for the real table was **which region the
+targets live in**: `0x3B2AF8..0x3B2FCC`, above `.text`, holding constructors and
+almost nothing else. Exactly one array points there. Generalising that means
+identifying the region first -- by finding code that no `jal` anywhere targets --
+and only then looking for arrays into it. That is the right shape for the next
+implementation.
+
+# Session end
+
+`pixels written: 0`. WTF does not render.
+
+Everything above is measured. The open question is one structure: seventeen
+asset records whose resource lists at `+184` read zero where an empty circular
+list must point at itself.
