@@ -874,3 +874,54 @@ constructing these objects.
    remaining lead.
 2. Confirm whether `0x000743F0` or `0x0007EAE8` actually executes, by watching
    both rather than inferring from a 32-entry trace.
+
+## Both misses are the same idiom, failing two different ways
+
+`0x0007EAE8` is a thin wrapper -- it calls `0x00066C34` with `a0 = s0 + 80`, so
+the array of 17 lives 80 bytes into a larger object. It constructs nothing
+itself.
+
+`0x0007EB24` uses the identical calling pattern to the vtable loop:
+
+```
+0007EB40  lw   $t9, 28($s0)     ; t9 = object's vptr
+0007EB44  lw   $t9, 12($t9)     ; t9 = vptr[3]
+0007EB48  jalr $ra, $t9
+```
+
+Same shape as `lw $t9, 12($s1); lw $t9, 12($t9); jalr`. So this is the
+project's standard virtual call: **object -> vptr -> slot 3**.
+
+The two failures differ, and the difference is the finding:
+
+| site | vptr | result |
+|------|------|--------|
+| `0x00066C78` | `0` | reads slot from address 12, calls 0 |
+| `0x0007EB48` | non-zero | slot holds `0x003C61D8` -- a `.bss` address |
+
+The second is the informative one. A vtable's slots must hold **code**
+addresses, and code lives below `filesz` (`0x3B4000`). `0x003C61D8` is in
+`.bss`. So this object's vptr does not point at a vtable at all -- it points at
+some other `.bss` structure, and slot 3 of that is whatever data happens to sit
+there.
+
+Vtables normally live in read-only data inside the file image. A vptr pointing
+into `.bss` therefore cannot be a correct vtable pointer that simply failed to
+be written; it is a *wrong* value that something did write.
+
+## What this narrows to
+
+Every symptom now traces to vptr installation: seventeen objects with vptr `0`,
+one object with a vptr aimed at `.bss`, and hash tables left zeroed because the
+subsystems those vptrs would have dispatched to never initialised them.
+
+The question is no longer "which initialiser did not run" but **"what installs
+vptrs in this program, and why does it produce zero in most cases and a `.bss`
+address in one?"**
+
+## Next
+
+Find a *working* virtual call -- there must be many, since execution reaches
+this far -- and compare its object's vptr against these. One correct example
+next to two broken ones will say whether vptrs are written by constructors, by
+a registration pass, or by the loader, and that determines where to look.
