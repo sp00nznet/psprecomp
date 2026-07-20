@@ -1154,3 +1154,49 @@ Find the callers of `0x00066DB4` and the other four siblings and walk up until
 reaching a function that *does* run. The boundary between "runs" and "never
 runs" is where the break is, and each step is a single watch and a single run
 with a yes/no answer.
+
+## The whole subtree is unreached, five levels up
+
+```
+0x00067E34  never ran     (17 x 1880 constructor loop)
+0x00067E08  never ran     (its entry point)
+0x00066DB4  never ran     (per-subsystem constructor)
+0x0005057C  never ran     (its caller)
+0x00074CC8  never ran  |
+0x0007BA3C  never ran  |  all four callers of 0x0005057C
+0x00082C14  never ran  |
+0x00085A30  never ran  |
+```
+
+Every level is dead. The walk did not find a "runs / never runs" boundary
+inside this subtree because the boundary is not in it -- **the entire
+construction tier is unreached.**
+
+## Re-reading the contradiction
+
+The earlier framing was "the dispatcher runs but the constructors do not, so
+construction is broken". With five dead levels that reading no longer fits.
+Consider the other side of it:
+
+Execution stalls after **470 function entries**. A game of this size runs
+thousands during normal start-up. So the more economical explanation is not
+that an initialisation tier is broken -- it is that **execution never gets far
+enough to reach it**, and the dispatcher at `0x00066C34` is being entered from
+some earlier path that should not have run yet, or should not have run at all.
+
+That inverts the search. The question is no longer "why was construction
+skipped" but **"why is a consumer of these objects running this early?"** --
+which is a question about the path taken *before* `0x0007EAE8`, not about the
+constructors.
+
+## Next
+
+1. Establish how `0x0007EAE8` is reached. Its caller chain, walked *downward*
+   from `module_start`, will show which branch led here at 470 entries deep.
+2. Compare against what should happen: if a `sceKernel*` call returned a wrong
+   value early, a start-up state machine could take an unintended branch and
+   land in a subsystem that has not been built yet. The firmware log is the
+   place to check -- HLE calls that returned zero when the game expected
+   something else.
+3. Note this reframing before resuming: four sections above were written on the
+   assumption that construction was broken. That assumption is now unsupported.
