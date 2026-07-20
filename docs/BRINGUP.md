@@ -1632,3 +1632,47 @@ whether `0x0000E538` branches on the first call or a later one.
 2. Read `0x0000E99C` -- the branch target -- to establish whether it is a
    failure path or ordinary control flow. The whole chain in this document
    assumes failure, and that assumption has not been checked.
+
+## Correction: there is no "guard" -- 0x0000E99C is normal control flow
+
+```
+0000E99C  beq   $a0, $zero, 0x0000E9F4
+0000E9A0  srl   $t1, $s1, 3
+0000E9A4  srl   $v1, $s1, 6
+0000E9A8  sltiu $v0, $a0, 5
+0000E9B4  sltiu $v0, $a0, 21
+```
+
+Shifts by 3 and 6 and comparisons against 5 and 21: this is **dlmalloc''s bin
+index computation**, not an error handler. So `beq $v0, $zero, 0x0000E99C` at
+`0x0000E538` is an ordinary branch into bucket selection, and the allocator
+proceeds normally through it.
+
+**The "allocator bails at a guard before sbrk" model is wrong** and should not
+be carried forward. It was built on naming `0x0000F27C` an arena getter (it is
+a lock) and reading its caller''s branch as failure (it is not). Two inferences
+stacked, neither measured.
+
+## What actually still holds
+
+Only what was measured:
+
+- The 32-byte allocation at `0x000743F8` returns null -- `0x0007443C` never runs.
+- `sceKernelAllocPartitionMemory` is never called in any run.
+- `$k0` is zero; setting it alone changes nothing.
+- The seventeen constructors never run; their vptrs stay zero; the chain walk
+  at `0x0004DD14` self-loops.
+
+Those are facts. Everything connecting them into a story about *where* inside
+the allocator the failure happens has now been wrong twice.
+
+## How to attack it without another inference chain
+
+Stop reading the allocator statically. It is a full dlmalloc and reading it
+branch by branch has produced two wrong models in two turns.
+
+Instead **bisect it by measurement**: `0x0000E4DC` is the entry and the null
+comes back to `0x000743F8`. Put watches at a handful of addresses spread
+through the allocator, see which are reached, and narrow to the block that
+decides. That is the same technique that found the constructor tier boundary in
+one turn after inference had failed for several.
