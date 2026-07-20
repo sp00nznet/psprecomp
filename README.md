@@ -59,7 +59,7 @@ the toolkit is the thing other people fork to recompile *their* PSP game.
           native executable — the recompiled game runs
 ```
 
-## Status — containers and KIRK CMD1 are up; the PRX tag layer is the gate
+## Status — decrypting via bootstrap, and discovery runs on real modules
 
 Phase 1 is done and it is real, not a skeleton. Pointed at a retail PSN dump of
 *WTF: Work Time Fun*, the tool walks the disc, identifies every layer, and
@@ -148,7 +148,7 @@ format:   ~PSP encrypted PRX
   module        boot_bin
   elf size      4212342 bytes (decrypted)
   decrypt mode  10
-  tag           0xF8710C50
+  tag           0x09000000
 ```
 
 KIRK CMD1 — the layer that actually decrypts — is done. What remains is the
@@ -181,8 +181,54 @@ separate process exactly like PPSSPP-as-oracle, produces it today. Finishing
 our own decryptor is about being self-contained, which is a goal but not a
 blocker.
 
-**Not started yet:** function discovery, the C emitter, the HLE library, the
-interpreter oracle.
+## Function discovery — running on real code
+
+With plaintext in hand (via the bootstrap above), the phase-3 analyzer works.
+Recursive descent from the module entry point and its exports, plus a linear
+harvest of `jal` targets, over all six modules on the WTF disc:
+
+| Module | `.text` | functions | reached | instructions | VFPU | imports |
+|---|---:|---:|---:|---:|---:|---:|
+| Lumberjack | 584 KB | 2206 | 75.0% | 112,026 | **0.19%** | 134 |
+| Lumberjack Challenge | 586 KB | 2211 | 75.0% | 112,541 | **0.19%** | 134 |
+| Séance | 601 KB | 2312 | 75.6% | 116,283 | **0.18%** | 134 |
+| Pendemonium | 603 KB | 2292 | 75.0% | 115,755 | **0.18%** | 134 |
+| Baseball Superstar | 656 KB | 2428 | 71.8% | 120,620 | **0.20%** | 134 |
+| `hell2k` (main) | 961 KB | 3410 | 70.2% | 172,794 | **0.14%** | 184 |
+
+Zero invalid instructions in any of them.
+
+**The VFPU is 0.2% of this game.** Only ~2% of functions touch it at all. The
+reason the PSP is usually called a hard recompilation target turns out not to
+apply to this title — which is exactly what `cover` and `funcs` exist to
+establish, instead of assuming it either way. Whether that generalizes to a 3D
+engine is a different question, and one the same tooling can answer per-title.
+
+The five microgames report **identical import counts (134) and near-identical
+VFPU density**, which says they share one engine — so engine work done for the
+first transfers to all five.
+
+Three things the analyzer had to get right, each found by looking at real code
+rather than reasoning about it:
+
+- **`module_start` is not the program.** It creates a thread and passes the
+  real entry as a *pointer*, so pure recursive descent from the entry point
+  finds 47 instructions and stops. Harvesting `jal` targets by linear scan
+  takes it from 1 function to 2,206.
+- **A forward `j` is a tail call, not local flow.** MIPS compilers emit `b`
+  (`beq $zero,$zero`) for unconditional jumps inside a function. Treating
+  `j 0x91E38 ; addiu $a0, $zero, 2` — a two-instruction thunk — as local flow
+  merged most of `.text` into one 121 KB "function".
+- **Function *extent* is not function *size*.** A 2-instruction thunk whose
+  branch reaches 120 KB away is not a 120 KB function. Reporting both, and
+  counting the ones where they diverge, is what made the bug visible.
+
+The remaining 25% is reachable only through function pointers — callbacks,
+vtables, thread entries. The `.rel.text` relocation table (190 KB in Lumberjack)
+lists every address the loader patches, which is the principled way to recover
+them, and is the next step.
+
+**Not started yet:** the C emitter, the HLE library, the interpreter oracle.
 
 ```
 # each Allegrex routine will become a readable C function; today the same

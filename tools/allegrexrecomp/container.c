@@ -244,7 +244,13 @@ int psp_header_parse(const uint8_t *d, size_t len, psp_header *out) {
     }
     out->devkit_version = rd32(d + 0x78);
     out->decrypt_mode   = d[0x7C];
-    out->tag            = rd32(d + 0x130);
+    /* The key tag lives at 0xD0. Offset 0x130 — which some references give —
+     * lands in the encrypted key material, where every module yields a
+     * different plausible-looking 32-bit value. That produces a convincing
+     * table of "distinct per-module tags" that is entirely noise. Verified
+     * against an independent decryptor: 0xD0 matches the tag it reports for
+     * both a mode 9 and a mode 10 module, and 0x130 matches neither. */
+    out->tag            = rd32(d + 0xD0);
     return 0;
 }
 
@@ -285,5 +291,125 @@ int elf_parse(const uint8_t *d, size_t len, elf_info *out) {
         }
     }
     out->nsegments = n;
+
+    /* Section headers, when present, tell us where the code actually is.
+     * They are optional and sometimes stripped, so everything here is
+     * best-effort on top of the segment information already gathered. */
+    uint32_t shoff     = rd32(d + 32);
+    uint16_t shentsize = rd16(d + 46);
+    uint16_t shnum     = rd16(d + 48);
+    uint16_t shstrndx  = rd16(d + 50);
+    if (!shoff || shentsize < 40 || !shnum || shstrndx >= shnum) return 0;
+
+    /* Locate the section-name string table via its own section header. */
+    size_t strhdr = (size_t)shoff + (size_t)shstrndx * shentsize;
+    if (strhdr + 40 > len) return 0;
+    uint32_t stroff = rd32(d + strhdr + 16);
+    uint32_t strsz  = rd32(d + strhdr + 20);
+    if ((size_t)stroff + strsz > len) return 0;
+
+    out->nsections = shnum;
+
+    for (uint16_t i = 0; i < shnum; i++) {
+        size_t sh = (size_t)shoff + (size_t)i * shentsize;
+        if (sh + 40 > len) break;
+
+        uint32_t nameoff = rd32(d + sh);
+        uint32_t addr    = rd32(d + sh + 12);
+        uint32_t off     = rd32(d + sh + 16);
+        uint32_t size    = rd32(d + sh + 20);
+        if (nameoff >= strsz) continue;
+
+        const char *name = (const char *)(d + stroff + nameoff);
+        /* The name table is bounded above, but a missing terminator would let
+         * strcmp run past it; cap the comparison length instead. */
+        size_t avail = strsz - nameoff;
+
+        if (avail > 5 && strncmp(name, ".text", 6) == 0) {
+            if ((size_t)off + size <= len) {
+                out->text_addr = addr;
+                out->text_offset = off;
+                out->text_size = size;
+                out->text_from_section = 1;
+            }
+        } else if (avail > 13 && strncmp(name, ".sceStub.text", 14) == 0) {
+            out->stub_addr = addr;
+            out->stub_offset = off;
+            out->stub_size = size;
+        } else if (avail > 21 && strncmp(name, ".rodata.sceModuleInfo", 22) == 0) {
+            out->modinfo_addr = addr;
+            out->modinfo_offset = off;
+            out->modinfo_size = size;
+        }
+    }
     return 0;
+}
+
+/* ---- PSP module info ----------------------------------------------------- */
+
+/* Layout, confirmed against a real module rather than taken from a header:
+ *
+ *   0x00  u16   attribute
+ *   0x02  u8[2] version (minor, major)
+ *   0x04  char  name[28]
+ *   0x20  u32   gp_value
+ *   0x24  u32   ent_top      exports
+ *   0x28  u32   ent_end
+ *   0x2C  u32   stub_top     imports
+ *   0x30  u32   stub_end
+ *                            = 0x34 bytes
+ *
+ * The widely-circulated struct has `attribute` as a u32 and `name` at 0x06,
+ * which shifts every field by two and yields a plausible-looking but wrong
+ * parse. The size settles it: `.rodata.sceModuleInfo` is exactly 52 (0x34)
+ * bytes, which only the layout above produces. Reading is byte-wise because
+ * the struct is packed and the u32s land on odd alignments. */
+int psp_modinfo_parse(const uint8_t *d, size_t len, uint32_t file_offset,
+                      psp_module_info *out) {
+    if ((size_t)file_offset + 0x34 > len) return -1;
+    const uint8_t *m = d + file_offset;
+
+    memset(out, 0, sizeof *out);
+    out->attribute  = rd16(m + 0x00);
+    out->version[0] = m[0x02];
+    out->version[1] = m[0x03];
+    memcpy(out->name, m + 0x04, 28);
+    out->name[28]   = '\0';
+    out->gp_value   = rd32(m + 0x20);
+    out->ent_top    = rd32(m + 0x24);
+    out->ent_end    = rd32(m + 0x28);
+    out->stub_top   = rd32(m + 0x2C);
+    out->stub_end   = rd32(m + 0x30);
+    return 0;
+}
+
+int psp_collect_exports(const uint8_t *d, size_t len,
+                        const psp_module_info *mi, uint32_t load_bias,
+                        uint32_t *out, int max) {
+    if (mi->ent_end <= mi->ent_top) return 0;
+
+    int found = 0;
+    /* Each entry is 0x10 bytes and describes one exported library. */
+    for (uint32_t e = mi->ent_top; e + 0x10 <= mi->ent_end; e += 0x10) {
+        size_t off = (size_t)e + load_bias;
+        if (off + 0x10 > len) break;
+
+        uint8_t  nfunc   = d[off + 0x08];
+        uint8_t  nvar    = d[off + 0x09];
+        uint32_t table   = rd32(d + off + 0x0C);
+
+        /* The table is (nfunc+nvar) NIDs followed by (nfunc+nvar) addresses.
+         * We want the function addresses: the first `nfunc` of the second
+         * half. Variables are data and are deliberately skipped. */
+        uint32_t total = (uint32_t)nfunc + nvar;
+        size_t addrs = (size_t)table + load_bias + (size_t)total * 4;
+        if (addrs + (size_t)nfunc * 4 > len) continue;
+
+        for (uint8_t i = 0; i < nfunc; i++) {
+            uint32_t fn = rd32(d + addrs + (size_t)i * 4);
+            if (found < max) out[found] = fn;
+            found++;
+        }
+    }
+    return found;
 }

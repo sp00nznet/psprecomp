@@ -12,6 +12,7 @@
 
 #include "container.h"
 #include "decode.h"
+#include "analyze.h"
 #include "keys.h"
 #include "crypto/kirk.h"
 
@@ -30,6 +31,7 @@ static int usage(void) {
         "  allegrexrecomp extract <file.iso> <substring> <outdir>\n"
         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
         "  allegrexrecomp cover   <file>\n"
+        "  allegrexrecomp funcs   <file> [--list]\n"
         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
         "\n"
@@ -163,8 +165,34 @@ static void print_elf_info(const uint8_t *d, size_t len) {
                (s->flags & 2) ? 'w' : '-',
                (s->flags & 1) ? 'x' : '-');
     }
+    if (e.nsections) printf("  sections      %d\n", e.nsections);
     if (e.text_size)
-        printf("  .text         0x%08X + %u bytes\n", e.text_addr, e.text_size);
+        printf("  code          0x%08X + %u bytes  (from %s)\n",
+               e.text_addr, e.text_size,
+               e.text_from_section ? ".text section" : "PT_LOAD segment");
+    if (e.stub_size)
+        printf("  import stubs  0x%08X + %u bytes\n", e.stub_addr, e.stub_size);
+
+    if (e.modinfo_size) {
+        psp_module_info mi;
+        if (psp_modinfo_parse(d, len, e.modinfo_offset, &mi) == 0) {
+            printf("  module info   0x%08X\n", e.modinfo_addr);
+            printf("    name        %s\n", mi.name);
+            printf("    attribute   0x%08X\n", mi.attribute);
+            printf("    gp          0x%08X\n", mi.gp_value);
+            printf("    exports     0x%08X..0x%08X\n", mi.ent_top, mi.ent_end);
+            printf("    imports     0x%08X..0x%08X\n", mi.stub_top, mi.stub_end);
+
+            /* load_bias converts a module virtual address to a file offset.
+             * A PRX links at 0, so the bias is just the segment's file
+             * offset. */
+            uint32_t bias = e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0;
+            uint32_t exp[512];
+            int n = psp_collect_exports(d, len, &mi, bias, exp,
+                                        (int)(sizeof exp / sizeof exp[0]));
+            printf("    exported fn %d\n", n);
+        }
+    }
 }
 
 static int cmd_info(const char *path) {
@@ -422,6 +450,117 @@ static int cmd_cover(const char *path) {
     return 0;
 }
 
+/* ---- function discovery -------------------------------------------------- */
+
+static int cmd_funcs(const char *path, int list) {
+    psp_blob b;
+    if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
+
+    elf_info e;
+    if (psp_sniff(b.data, b.size < 16 ? b.size : 16) != FMT_ELF ||
+        elf_parse(b.data, b.size, &e) != 0 || !e.text_size) {
+        fprintf(stderr, "%s is not a decrypted ELF/PRX with code in it\n", path);
+        fprintf(stderr, "(encrypted modules must be decrypted first — see docs/DECRYPT.md)\n");
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    a_analysis an;
+    memset(&an, 0, sizeof an);
+    an.code = b.data + e.text_offset;
+    an.base = e.text_addr;
+    an.size = e.text_size;
+    an.stub_addr = e.stub_addr;
+    an.stub_size = e.stub_size;
+    an.scan_calls = 1;
+
+    /* Seeds: the module entry point, plus every exported function. Exports
+     * matter because a library entry that nothing internal calls is
+     * unreachable from the entry point alone. */
+    uint32_t seeds[544];
+    int nseeds = 0;
+    seeds[nseeds++] = e.entry;
+
+    psp_module_info mi;
+    int nexports = 0;
+    if (e.modinfo_size && psp_modinfo_parse(b.data, b.size, e.modinfo_offset, &mi) == 0) {
+        uint32_t bias = e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0;
+        nexports = psp_collect_exports(b.data, b.size, &mi, bias,
+                                       seeds + nseeds, (int)(sizeof seeds / sizeof seeds[0]) - nseeds);
+        if (nexports > (int)(sizeof seeds / sizeof seeds[0]) - nseeds)
+            nexports = (int)(sizeof seeds / sizeof seeds[0]) - nseeds;
+        nseeds += nexports;
+    }
+
+    if (a_discover(&an, seeds, nseeds) != 0) {
+        fprintf(stderr, "discovery failed (out of memory)\n");
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    printf("module:     %s\n", path);
+    printf("code:       0x%08X + %u bytes  (%u instructions)\n",
+           an.base, an.size, an.size / 4);
+    printf("seeds:      %d (entry 0x%08X + %d exports)\n", nseeds, e.entry, nexports);
+    printf("\n");
+    printf("functions:  %d\n", an.nfuncs);
+    printf("reached:    %u bytes (%.2f%% of .text)\n", an.bytes_reached,
+           an.size ? 100.0 * an.bytes_reached / an.size : 0.0);
+    printf("imports:    %d distinct firmware calls\n", an.nimports);
+    printf("indirect:   %d unresolved computed jumps\n", an.nindirects);
+
+    /* The honest VFPU cost for this title: measured over discovered code, not
+     * over a segment that is mostly data. */
+    printf("\nover discovered code:\n");
+    printf("  instructions %llu\n", (unsigned long long)an.insns);
+    printf("  vfpu         %llu (%.2f%%)\n", (unsigned long long)an.vfpu,
+           an.insns ? 100.0 * (double)an.vfpu / (double)an.insns : 0.0);
+    printf("  invalid      %llu (%.2f%%)\n", (unsigned long long)an.invalid,
+           an.insns ? 100.0 * (double)an.invalid / (double)an.insns : 0.0);
+
+    int with_vfpu = 0, no_return = 0, with_indirect = 0, scattered = 0;
+    uint32_t biggest = 0, biggest_addr = 0;
+    for (int i = 0; i < an.nfuncs; i++) {
+        const a_func *f = &an.funcs[i];
+        if (f->has_vfpu) with_vfpu++;
+        if (!f->has_return) no_return++;
+        if (f->has_indirect) with_indirect++;
+
+        /* A function's real size is the code in it. Its *extent* is the span
+         * from entry to the furthest address reached, which is larger when
+         * blocks are not contiguous. When extent runs far ahead of size the
+         * boundary is probably wrong, so those are counted rather than
+         * averaged away. */
+        uint32_t code = f->insns * 4;
+        uint32_t extent = f->end - f->addr;
+        if (extent > code * 2 + 64) scattered++;
+        if (code > biggest) { biggest = code; biggest_addr = f->addr; }
+    }
+    printf("\nfunction shape:\n");
+    printf("  touch vfpu       %d (%.1f%%)\n", with_vfpu,
+           an.nfuncs ? 100.0 * with_vfpu / an.nfuncs : 0.0);
+    printf("  no `jr $ra`      %d   (tail calls, or traced into data)\n", no_return);
+    printf("  computed jumps   %d\n", with_indirect);
+    printf("  scattered        %d   (extent >> code size; suspect boundaries)\n", scattered);
+    printf("  largest          0x%08X, %u bytes of code\n", biggest_addr, biggest);
+
+    if (list) {
+        printf("\n%-12s %-10s %-8s %s\n", "addr", "size", "insns", "flags");
+        for (int i = 0; i < an.nfuncs; i++) {
+            const a_func *f = &an.funcs[i];
+            printf("0x%08X  %-10u %-8u %s%s%s\n",
+                   f->addr, f->end - f->addr, f->insns,
+                   f->has_return   ? "ret "      : "",
+                   f->has_indirect ? "indirect " : "",
+                   f->has_vfpu     ? "vfpu"      : "");
+        }
+    }
+
+    a_analysis_free(&an);
+    psp_blob_free(&b);
+    return 0;
+}
+
 /* ---- decryption ---------------------------------------------------------- */
 
 static uint32_t rd32le(const uint8_t *p) {
@@ -632,6 +771,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "info"))    return cmd_info(argv[2]);
     if (!strcmp(cmd, "ls"))      return cmd_ls(argv[2]);
     if (!strcmp(cmd, "cover"))   return cmd_cover(argv[2]);
+    if (!strcmp(cmd, "funcs"))   return cmd_funcs(argv[2], argc > 3 && !strcmp(argv[3], "--list"));
     if (!strcmp(cmd, "extract")) {
         if (argc < 5) return usage();
         return cmd_extract(argv[2], argv[3], argv[4]);

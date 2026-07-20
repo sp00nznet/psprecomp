@@ -106,12 +106,36 @@ about being self-contained, which is a goal but not a gate.
 
 ## Phase 3 — function discovery + the C emitter
 
-- [ ] **Recursive-descent discovery** — seed from the module entry point and the
-      PRX export table, follow calls and branches, carve function boundaries at
-      `jr $ra`, record indirect targets as external.
+- [x] **ELF section parsing** — `.text` gives the true code extent. A PSP PRX
+      has one rwx `PT_LOAD` covering code *and* data, so decoding the segment
+      measures 3.3 MB of data as instructions. Using `.text` moved decode
+      coverage on Lumberjack from 70.8% to **99.81%, with 0% unknown**.
+- [x] **Module info + export table** — layout corrected against a real module
+      (`attribute` is a u16 and `name` starts at 0x04; the widely-circulated
+      struct shifts every field by two). Verified by cross-checking the parsed
+      export/import ranges against the `.lib.ent` / `.lib.stub` section
+      addresses.
+- [x] **Recursive-descent discovery** — seeds from the entry point and exports,
+      follows calls and branches, carves at `jr $ra`, classifies calls into
+      `.sceStub.text` as HLE imports rather than functions.
+- [x] **`jal` harvesting by linear scan** — required, not optional: PSP
+      `module_start` passes the real entry point to a thread as a *pointer*, so
+      recursive descent alone finds 47 instructions. 1 function -> 2206.
+- [x] **Tail-call disambiguation** — a full entry map built before walking, so
+      a forward `j` is recognised as a tail call and a walk stops when it runs
+      into the next function's entry. Without it one trace swallowed 121 KB.
+- [x] **Honest metrics** — code size (instructions actually visited) reported
+      separately from extent (entry to furthest address), with divergence
+      counted. This is what made the tail-call bug visible.
+- [x] **Validated across six real modules** — 2206-3410 functions each, ~75% of
+      `.text` reached, **zero invalid instructions**, VFPU measured at 0.14-0.20%.
+- [ ] **Relocation mining** — `.rel.text` lists every address the loader
+      patches, including the function pointers behind callbacks, vtables and
+      thread entries. This is the principled way to reach the remaining ~25%.
 - [ ] **Jump-table resolution** — the `lui`/`addiu`/`sll`/`addu`/`lw`/`jr`
-      idiom that MIPS compilers emit for `switch`. Unresolved tables become
-      dispatch-table lookups rather than analysis failures.
+      idiom that MIPS compilers emit for `switch`. 38 unresolved sites in
+      Lumberjack. Unresolved tables become dispatch-table lookups rather than
+      analysis failures.
 - [ ] **The delay-slot problem.** Every MIPS branch executes the following
       instruction before the branch takes effect. The emitter must reorder or
       duplicate it correctly, and likely-branches nullify theirs when not taken.

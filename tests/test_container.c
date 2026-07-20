@@ -97,7 +97,11 @@ static void test_psp_header(void) {
     put32(buf + 0x30, 0x08900000);      /* boot_entry */
     put32(buf + 0x44, 0x08900000);      /* seg 0 address */
     put32(buf + 0x54, 0x00040000);      /* seg 0 size */
-    put32(buf + 0x130, 0x4C949AF0);     /* tag */
+    /* The key tag lives at 0xD0. It is deliberately pinned here: an earlier
+     * revision read it from 0x130, which lands in the encrypted key material
+     * and yields a different plausible-looking value per module. */
+    put32(buf + 0xD0, 0x4C949AF0);
+    put32(buf + 0x130, 0xDEADBEEF);     /* must NOT be mistaken for the tag */
 
     psp_header h;
     CHECK(psp_header_parse(buf, sizeof buf, &h) == 0, "parse a ~PSP header");
@@ -106,7 +110,7 @@ static void test_psp_header(void) {
     CHECK(h.elf_size == 0x00100000, "decrypted ELF size");
     CHECK(h.boot_entry == 0x08900000, "boot entry");
     CHECK(h.seg_address[0] == 0x08900000, "segment 0 address");
-    CHECK(h.tag == 0x4C949AF0, "key tag");
+    CHECK(h.tag == 0x4C949AF0, "key tag read from 0xD0, not 0x130");
 
     /* The module name field is not guaranteed NUL-terminated on disc; the
      * parser must terminate it itself rather than running into the next field. */

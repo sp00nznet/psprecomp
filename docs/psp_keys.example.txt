@@ -29,27 +29,22 @@ kirk1 = 00000000000000000000000000000000
 # ---------------------------------------------------------------------------
 # Per-tag PRX keys
 #
-# A ~PSP module carries a 32-bit tag at header offset 0x130 selecting a key
-# set. Name each entry `prx.<TAG>` with the tag in uppercase hex.
+# A ~PSP module carries a 32-bit tag at header offset 0xD0 selecting a key set.
+# Name each entry `prx.<TAG>` with the tag in uppercase hex.
 #
-# The tags observed on WTF: Work Time Fun (ULUS10172) are listed below as
-# concrete examples of what needs filling in -- one per module, six in total:
+# Note 0xD0, not 0x130. Offset 0x130 falls inside the encrypted key material
+# and yields a different plausible-looking value for every module -- see the
+# correction in docs/DECRYPT.md.
 #
-#   prx.88CF097F   EBOOT.BIN        module "hell2k"      decrypt mode 9
-#   prx.F8710C50   b00_bootbin.dat  Baseball Superstar   decrypt mode 10
-#   prx.4597CB4E   b02_bootbin.dat  Lumberjack           decrypt mode 10
-#   prx.1F628E58   b04_bootbin.dat  Pendemonium          decrypt mode 10
-#   prx.B4050E6E   b80_bootbin.dat  Lumberjack Challenge decrypt mode 10
-#   prx.9B09CE7E   b81_bootbin.dat  Séance               decrypt mode 10
+# The tags observed on WTF: Work Time Fun (ULUS10172), as concrete examples:
+#
+#   prx.C0CB167C   EBOOT.BIN, module "hell2k"   decrypt mode 9
+#   prx.09000000   all five game-sharing microgames, decrypt mode 10
 #
 # These are commented out because the tag -> CMD1 transform that consumes them
 # is not implemented yet (see docs/DECRYPT.md, phase 2b). Uncomment and fill
 # them when it is.
 # ---------------------------------------------------------------------------
 
-# prx.88CF097F = ...
-# prx.F8710C50 = ...
-# prx.4597CB4E = ...
-# prx.1F628E58 = ...
-# prx.B4050E6E = ...
-# prx.9B09CE7E = ...
+# prx.C0CB167C = ...
+# prx.09000000 = ...

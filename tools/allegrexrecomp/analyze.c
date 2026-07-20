@@ -1,0 +1,336 @@
+/* Function discovery. See analyze.h. */
+
+#include "analyze.h"
+#include "decode.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+/* ---- a growable uint32 list ---------------------------------------------- */
+
+typedef struct { uint32_t *v; int n, cap; } u32list;
+
+static int u32_push(u32list *l, uint32_t x) {
+    if (l->n == l->cap) {
+        int cap = l->cap ? l->cap * 2 : 256;
+        uint32_t *v = (uint32_t *)realloc(l->v, (size_t)cap * sizeof *v);
+        if (!v) return -1;
+        l->v = v;
+        l->cap = cap;
+    }
+    l->v[l->n++] = x;
+    return 0;
+}
+
+static int u32_contains(const u32list *l, uint32_t x) {
+    for (int i = 0; i < l->n; i++) if (l->v[i] == x) return 1;
+    return 0;
+}
+
+/* ---- per-word bookkeeping ------------------------------------------------ */
+
+#define SEEN_CODE  0x01   /* decoded as an instruction */
+#define SEEN_ENTRY 0x02   /* known function entry */
+
+static uint32_t word_index(const a_analysis *an, uint32_t addr) {
+    return (addr - an->base) >> 2;
+}
+
+int a_in_range(const a_analysis *an, uint32_t addr) {
+    return addr >= an->base && addr < an->base + an->size && (addr & 3) == 0;
+}
+
+static int is_import_stub(const a_analysis *an, uint32_t addr) {
+    return an->stub_size && addr >= an->stub_addr &&
+           addr < an->stub_addr + an->stub_size;
+}
+
+static uint32_t fetch(const a_analysis *an, uint32_t addr) {
+    const uint8_t *p = an->code + (addr - an->base);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* ---- the walk ------------------------------------------------------------ */
+
+typedef struct {
+    a_analysis *an;
+    uint8_t    *seen;
+    /* Every address known to be a function entry, marked before any walking
+     * starts. Knowing the full entry set up front is what lets a walk tell a
+     * tail call from a local jump, and lets it stop when it runs off the end
+     * of one function into the start of the next. */
+    uint8_t    *entry_map;
+    u32list    *func_queue;
+    u32list    *imports;
+    u32list    *indirects;
+} walk_ctx;
+
+static int is_known_entry(const walk_ctx *c, uint32_t addr) {
+    if (!a_in_range(c->an, addr)) return 0;
+    return c->entry_map[word_index(c->an, addr)] != 0;
+}
+
+/* Record a call target. Import thunks are boundaries, not functions to walk
+ * into: they get patched at load time and their contents in the file are
+ * meaningless. Everything else is a function entry. */
+static void note_call(walk_ctx *c, uint32_t target) {
+    if (is_import_stub(c->an, target)) {
+        if (!u32_contains(c->imports, target)) u32_push(c->imports, target);
+        return;
+    }
+    if (!a_in_range(c->an, target)) return;
+    u32_push(c->func_queue, target);
+}
+
+/* Walk one function from `entry`, filling in `out`. Returns 0 if anything was
+ * decoded, -1 if the entry was unusable. */
+static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
+    a_analysis *an = c->an;
+    if (!a_in_range(an, entry)) return -1;
+
+    u32list blocks = { 0 };
+    if (u32_push(&blocks, entry) != 0) return -1;
+
+    uint32_t end = entry;
+    uint32_t insns = 0;
+    unsigned has_return = 0, has_indirect = 0, has_vfpu = 0;
+
+    /* Instructions visited by *this* function, so a block shared with an
+     * earlier function does not get walked twice here but is still counted
+     * once globally. */
+    while (blocks.n) {
+        uint32_t a = blocks.v[--blocks.n];
+
+        while (a_in_range(an, a)) {
+            uint32_t idx = word_index(an, a);
+            if (c->seen[idx] & SEEN_CODE) break;    /* already walked */
+
+            /* Arriving at a different function's entry means we walked off the
+             * end of this one — a tail call, or a function that ends without a
+             * visible return. Stop; that address is walked as its own function.
+             * Without this a single trace swallows every function that follows
+             * it in address order. */
+            if (a != entry && is_known_entry(c, a)) break;
+
+            a_insn in;
+            a_decode(fetch(an, a), a, &in);
+            c->seen[idx] |= SEEN_CODE;
+            insns++;
+            an->insns++;
+            if (a + 4 > end) end = a + 4;
+
+            if (in.op == A_INVALID) {
+                /* Almost always data reached by a bad path. Stop this trace
+                 * rather than manufacturing instructions out of it. */
+                an->invalid++;
+                break;
+            }
+            if (in.op == A_VFPU_UNKNOWN) { an->vfpu++; has_vfpu = 1; }
+
+            /* Every branch and jump has a delay slot that executes before
+             * control transfers, so it is always part of this function and is
+             * always visited — including on paths that leave here. */
+            if (in.has_delay_slot) {
+                uint32_t d = a + 4;
+                if (a_in_range(an, d)) {
+                    uint32_t didx = word_index(an, d);
+                    if (!(c->seen[didx] & SEEN_CODE)) {
+                        a_insn din;
+                        a_decode(fetch(an, d), d, &din);
+                        c->seen[didx] |= SEEN_CODE;
+                        insns++;
+                        an->insns++;
+                        if (din.op == A_VFPU_UNKNOWN) { an->vfpu++; has_vfpu = 1; }
+                        if (din.op == A_INVALID) an->invalid++;
+                    }
+                    if (d + 4 > end) end = d + 4;
+                }
+            }
+
+            if (in.is_call) {
+                /* jal / jalr / the *al REGIMM forms. Direct calls give us a
+                 * new function; indirect ones we cannot resolve statically. */
+                if (in.has_target && !in.is_indirect) note_call(c, in.target);
+                else if (in.is_indirect) has_indirect = 1;
+                a += 8;                     /* past the delay slot; calls return */
+                continue;
+            }
+
+            if (in.is_return) { has_return = 1; break; }
+
+            if (in.is_indirect) {
+                /* `jr $rN` — a computed jump, usually a switch table. We
+                 * cannot follow it without resolving the table, so record the
+                 * site and stop. These are the concrete targets for jump-table
+                 * analysis; they are counted rather than silently dropped. */
+                has_indirect = 1;
+                if (!u32_contains(c->indirects, a)) u32_push(c->indirects, a);
+                break;
+            }
+
+            if (in.is_branch) {
+                /* Conditional: the target is another block of this function,
+                 * and execution also falls through past the delay slot. */
+                if (in.has_target && a_in_range(an, in.target))
+                    u32_push(&blocks, in.target);
+                a += 8;
+                continue;
+            }
+
+            if (in.is_jump) {
+                /* Unconditional `j`. MIPS compilers emit `b` — which is
+                 * `beq $zero, $zero` and decodes as a branch — for local
+                 * unconditional flow inside a function. A `j` is therefore
+                 * almost always either a tail call or a loop back-edge, and
+                 * the direction tells them apart:
+                 *
+                 *   backward -> a loop back-edge, a block of this function
+                 *   forward  -> a tail call, the entry of another function
+                 *
+                 * Observed in this module as two-instruction thunks:
+                 *     j 0x00091E38 ; addiu $a0, $zero, 2
+                 * Treating that forward `j` as local flow pulls the callee
+                 * into the thunk and, transitively, swallows most of .text
+                 * into one 121 KB "function".
+                 *
+                 * Over-splitting is the safe direction to err: a wrongly split
+                 * function is still correct code reached through the dispatch
+                 * table, whereas a wrongly merged one has bogus boundaries. */
+                if (in.has_target && a_in_range(an, in.target)) {
+                    if (in.target <= a && !is_known_entry(c, in.target)) {
+                        u32_push(&blocks, in.target);          /* loop */
+                    } else {
+                        uint32_t ti = word_index(an, in.target);
+                        if (!c->entry_map[ti]) {
+                            c->entry_map[ti] = 1;
+                            u32_push(c->func_queue, in.target); /* tail call */
+                        }
+                    }
+                }
+                break;
+            }
+
+            a += 4;
+        }
+    }
+
+    free(blocks.v);
+
+    if (!insns) return -1;
+
+    memset(out, 0, sizeof *out);
+    out->addr = entry;
+    out->end = end;
+    out->insns = insns;
+    out->has_return = has_return;
+    out->has_indirect = has_indirect;
+    out->has_vfpu = has_vfpu;
+    return 0;
+}
+
+static int cmp_func(const void *a, const void *b) {
+    uint32_t x = ((const a_func *)a)->addr, y = ((const a_func *)b)->addr;
+    return (x > y) - (x < y);
+}
+
+int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
+    an->funcs = NULL; an->nfuncs = 0;
+    an->imports = NULL; an->nimports = 0;
+    an->indirects = NULL; an->nindirects = 0;
+    an->insns = an->vfpu = an->invalid = 0;
+    an->bytes_reached = 0;
+
+    const uint32_t nwords = an->size >> 2;
+    uint8_t *seen = (uint8_t *)calloc(nwords ? nwords : 1, 1);
+    if (!seen) return -1;
+
+    uint8_t *entry_map = (uint8_t *)calloc(nwords ? nwords : 1, 1);
+    if (!entry_map) { free(seen); return -1; }
+
+    u32list queue = { 0 }, imports = { 0 }, indirects = { 0 };
+    walk_ctx ctx = { an, seen, entry_map, &queue, &imports, &indirects };
+
+    /* Pass 1: establish the complete set of function entries before walking
+     * anything. Both the tail-call test and the ran-off-the-end test need to
+     * ask "is this somebody's entry?", and neither can answer correctly if
+     * entries are still being discovered as the walk proceeds. */
+    for (int i = 0; i < nseeds; i++) {
+        if (!a_in_range(an, seeds[i])) continue;
+        entry_map[word_index(an, seeds[i])] = 1;
+        u32_push(&queue, seeds[i]);
+    }
+
+    /* Harvest `jal` targets by linear scan. See the note in analyze.h for why
+     * this is required rather than a nicety on PSP. Duplicates are harmless —
+     * the entry map makes the second sighting a no-op — so no membership test
+     * is done here, which keeps this O(n) rather than O(n^2). */
+    if (an->scan_calls) {
+        for (uint32_t off = 0; off + 4 <= an->size; off += 4) {
+            uint32_t a = an->base + off;
+            a_insn in;
+            a_decode(fetch(an, a), a, &in);
+            if (in.op != A_JAL || !in.has_target) continue;
+            if (!a_in_range(an, in.target) || is_import_stub(an, in.target)) continue;
+
+            uint32_t ti = word_index(an, in.target);
+            if (entry_map[ti]) continue;
+            entry_map[ti] = 1;
+            u32_push(&queue, in.target);
+        }
+    }
+
+    a_func *funcs = NULL;
+    int nfuncs = 0, cap = 0;
+
+    /* The queue grows as calls are found; this terminates because every
+     * function entry is marked and never walked twice, and there are finitely
+     * many words. */
+    while (queue.n) {
+        uint32_t entry = queue.v[--queue.n];
+        if (!a_in_range(an, entry)) continue;
+
+        uint32_t idx = word_index(an, entry);
+        if (seen[idx] & SEEN_ENTRY) continue;
+        seen[idx] |= SEEN_ENTRY;
+
+        a_func f;
+        if (trace_function(&ctx, entry, &f) != 0) continue;
+
+        if (nfuncs == cap) {
+            int ncap = cap ? cap * 2 : 512;
+            a_func *nf = (a_func *)realloc(funcs, (size_t)ncap * sizeof *nf);
+            if (!nf) break;
+            funcs = nf;
+            cap = ncap;
+        }
+        funcs[nfuncs++] = f;
+    }
+
+    for (uint32_t i = 0; i < nwords; i++)
+        if (seen[i] & SEEN_CODE) an->bytes_reached += 4;
+
+    qsort(funcs, (size_t)nfuncs, sizeof *funcs, cmp_func);
+
+    an->funcs = funcs;
+    an->nfuncs = nfuncs;
+    an->imports = imports.v;
+    an->nimports = imports.n;
+    an->indirects = indirects.v;
+    an->nindirects = indirects.n;
+
+    free(queue.v);
+    free(seen);
+    free(entry_map);
+    return 0;
+}
+
+void a_analysis_free(a_analysis *an) {
+    free(an->funcs);
+    free(an->imports);
+    free(an->indirects);
+    an->funcs = NULL;
+    an->imports = NULL;
+    an->indirects = NULL;
+    an->nfuncs = an->nimports = an->nindirects = 0;
+}

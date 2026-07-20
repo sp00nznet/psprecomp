@@ -1,0 +1,99 @@
+/* Function discovery — recursive descent over Allegrex code.
+ *
+ * The emitter needs to know where functions begin and end. Nothing in a
+ * stripped PRX says so directly, so we recover it by following control flow
+ * from a set of seeds until nothing new is reachable.
+ *
+ * The signals we lean on, in order of reliability:
+ *
+ *   1. `jal <target>` — a direct call. Its target is a function entry, full
+ *      stop. This is by far the strongest signal and most of a module is
+ *      discovered through it.
+ *   2. `jr $ra` — a return, and therefore a function end. The decoder
+ *      distinguishes this from `jr $rN` precisely so discovery can rely on it;
+ *      conflating them either truncates every function at its first jump table
+ *      or never closes one at all.
+ *   3. The module's entry point and its exported function addresses, as seeds.
+ *
+ * What this deliberately does NOT do is scan linearly for function prologues.
+ * That finds more, but it also finds data that happens to look like a
+ * prologue, and a wrong function boundary produces C that compiles and
+ * silently misbehaves. Recursive descent under-approximates, which is the
+ * right direction to be wrong in: everything it reports is genuinely reachable
+ * code, and what it misses shows up as unreached bytes we can go and account
+ * for.
+ */
+#ifndef ALLEGREX_ANALYZE_H
+#define ALLEGREX_ANALYZE_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    uint32_t addr;          /* function entry */
+    uint32_t end;           /* one past the highest instruction reached */
+    uint32_t insns;         /* instructions actually visited */
+    unsigned has_return  : 1;   /* reaches a `jr $ra` */
+    unsigned has_indirect: 1;   /* contains an unresolved computed jump */
+    unsigned has_vfpu    : 1;   /* touches the VFPU */
+} a_func;
+
+typedef struct {
+    /* Input */
+    const uint8_t *code;
+    uint32_t base;              /* virtual address of code[0] */
+    uint32_t size;
+    uint32_t stub_addr, stub_size;   /* import thunks; calls here are HLE */
+
+    /* Also harvest call targets by linearly scanning the code for `jal`.
+     *
+     * Necessary on PSP, not optional. A module's `module_start` typically does
+     * little more than create a thread, passing the real entry point as a
+     * *pointer* to sceKernelCreateThread. That pointer is built with
+     * lui/addiu, so the bulk of a game is never the target of a `jal` from
+     * anything reachable — pure recursive descent from the entry point finds
+     * the init stub and stops.
+     *
+     * `jal` carries an absolute target, so a linear scan recovers those
+     * targets without needing to reach the instruction by control flow. The
+     * cost is that data decoding as `jal` yields bogus seeds; over a real
+     * `.text` (99.8% valid instructions) that is rare, and a bogus seed
+     * produces a function that fails to reach a `jr $ra`, which the report
+     * counts separately. */
+    int scan_calls;
+
+    /* Output */
+    a_func   *funcs;
+    int       nfuncs;
+    uint32_t *imports;          /* distinct import stubs called */
+    int       nimports;
+    uint32_t *indirects;        /* sites with an unresolved computed jump */
+    int       nindirects;
+
+    /* Statistics over *discovered* code only — the number that matters, as
+     * opposed to coverage over a whole segment that is mostly data. */
+    uint64_t insns;
+    uint64_t vfpu;
+    uint64_t invalid;
+    uint32_t bytes_reached;
+} a_analysis;
+
+/* Run discovery. `seeds` are function entry addresses to start from (the
+ * module entry point and its exports). Returns 0 on success.
+ * Call a_analysis_free() when done. */
+int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds);
+
+void a_analysis_free(a_analysis *an);
+
+/* Is `addr` inside the discovered code extent? */
+int a_in_range(const a_analysis *an, uint32_t addr);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* ALLEGREX_ANALYZE_H */

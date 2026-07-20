@@ -126,11 +126,53 @@ typedef struct {
     uint32_t entry;
     int      nsegments;
     elf_segment seg[8];
-    /* The .text extent we hand to the decoder: the first executable segment. */
+
+    /* The extent we hand to the decoder.
+     *
+     * A PSP PRX typically has ONE PT_LOAD marked rwx covering the whole file —
+     * code and data together. Decoding all of it treats megabytes of data as
+     * instructions, which inflates every coverage number and buries the real
+     * code. When section headers survive (they usually do) `.text` gives the
+     * true code extent, which for a real module is a small fraction of the
+     * segment. We prefer sections and fall back to the segment. */
     uint32_t text_addr, text_offset, text_size;
+    int      text_from_section;   /* 1 if .text, 0 if we fell back to PT_LOAD */
+
+    /* Import thunks — one small stub per firmware function the module calls.
+     * Calls that land here are HLE boundaries, not internal functions. */
+    uint32_t stub_addr, stub_offset, stub_size;
+
+    /* .rodata.sceModuleInfo — exports, imports and $gp. */
+    uint32_t modinfo_addr, modinfo_offset, modinfo_size;
+
+    int      nsections;
 } elf_info;
 
 int elf_parse(const uint8_t *data, size_t len, elf_info *out);
+
+/* ---- PSP module info ------------------------------------------------------
+ * The PRX descriptor: where the export and import tables live, and the $gp
+ * value the module's code assumes. Exported function addresses are the single
+ * best seed set for function discovery after the entry point. */
+
+typedef struct {
+    uint32_t attribute;
+    uint8_t  version[2];
+    char     name[29];
+    uint32_t gp_value;
+    uint32_t ent_top, ent_end;     /* export table */
+    uint32_t stub_top, stub_end;   /* import table */
+} psp_module_info;
+
+int psp_modinfo_parse(const uint8_t *data, size_t len, uint32_t file_offset,
+                      psp_module_info *out);
+
+/* Collect exported function addresses into `out`, returning how many were
+ * found (which may exceed `max`, in which case only `max` were written).
+ * `load_bias` converts a module virtual address to a file offset. */
+int psp_collect_exports(const uint8_t *data, size_t len,
+                        const psp_module_info *mi, uint32_t load_bias,
+                        uint32_t *out, int max);
 
 #ifdef __cplusplus
 }

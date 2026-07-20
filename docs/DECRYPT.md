@@ -28,16 +28,34 @@ game-sharing modules:
 
 | Module | Title | Decrypted size | Decrypt mode | Key tag |
 |---|---|---:|---:|---|
-| `b00_bootbin.dat` | Baseball Superstar | 4,212,342 | 10 | `0xF8710C50` |
-| `b02_bootbin.dat` | Lumberjack | 4,104,742 | 10 | `0x4597CB4E` |
-| `b04_bootbin.dat` | Pendemonium | 4,393,310 | 10 | `0x1F628E58` |
-| `b80_bootbin.dat` | Lumberjack Challenge | 4,092,606 | 10 | `0xB4050E6E` |
-| `b81_bootbin.dat` | Séance | 4,725,526 | 10 | `0x9B09CE7E` |
+| `EBOOT.BIN` | (main executable, `hell2k`) | 1,224,764 | 9 | `0xC0CB167C` |
+| `b00_bootbin.dat` | Baseball Superstar | 4,212,342 | 10 | `0x09000000` |
+| `b02_bootbin.dat` | Lumberjack | 4,104,742 | 10 | `0x09000000` |
+| `b04_bootbin.dat` | Pendemonium | 4,393,310 | 10 | `0x09000000` |
+| `b80_bootbin.dat` | Lumberjack Challenge | 4,092,606 | 10 | `0x09000000` |
+| `b81_bootbin.dat` | Séance | 4,725,526 | 10 | `0x09000000` |
 
-Five modules, five *different* tags. That is useful: it means a correct
-implementation has to consult the key table properly, and a wrong one that
-hard-codes a single key will fail visibly on the second module rather than
-appearing to work.
+### A correction worth recording
+
+An earlier revision of this document listed *five different* tags for the five
+game-sharing modules, read from header offset `0x130`. **That was wrong**, and
+the way it was wrong is instructive.
+
+`0x130` lands inside the encrypted key material. Every module therefore yields
+a different, perfectly plausible-looking 32-bit value there — which reads
+exactly like a per-module tag and even supports a satisfying conclusion ("five
+distinct tags, so the key table gets exercised immediately"). It was noise.
+
+The tag is at **`0xD0`**. Cross-checked against an independent decryptor, `0xD0`
+reproduces the tag it reports for both a mode 9 and a mode 10 module, and
+`0x130` matches neither. The real picture is the opposite of the earlier one:
+all five microgames share a single tag and differ only from the main
+executable.
+
+The lesson is the one this project keeps relearning — a plausible reading of a
+binary is not a verified one. The check that caught it was running an
+independent implementation and comparing, which is exactly what
+[`ORACLE.md`](ORACLE.md) argues for.
 
 ## KIRK
 
