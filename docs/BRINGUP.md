@@ -320,3 +320,56 @@ program that then waits forever for something that callback was supposed to do.
 2. Disassemble `0x000471F4` and read the loop condition directly — it will name
    the memory it is waiting on.
 3. The 240 undecoded GE commands still hide whatever would set `vtype`.
+
+---
+
+# The hang, located exactly
+
+## Read the trace in the right direction
+
+`psp_trace_dump()` prints **newest first**. Reading the tail of a redirected
+log therefore shows the *oldest* of the last 32 entries, and two rounds of
+disassembly went into short leaf helpers that were never the problem. Running
+the watchdog at 20s and 60s and diffing the two dumps is what caught it: both
+stop at exactly **470 function entries**, so execution genuinely stalls rather
+than crawling.
+
+## The loop
+
+`0x0004DD14`, reached through `0x0004DBB0` ? `0x0004DCF8`:
+
+```
+0004DD14  addu $t0, $a0, $a2          ; base + offset
+0004DD18  lw   $a2, 4($t0)            ; compare key
+0004DD1C  bne  $a2, $t1, 0x0004DD38
+...
+0004DD40  lhu  $v0, 16($t0)           ; next index
+0004DD44  bnel $v0, $t2, 0x0004DD14   ; loop while != sentinel
+0004DD48  sll  $a2, $v0, 4            ; 16-byte stride
+```
+
+A chain walk over 16-byte entries: read the next index from `+16`, stop when it
+equals the sentinel `$t2` (loaded from `+24` of the header back at
+`0x0004DA60`). It never stops.
+
+## What that rules out
+
+Host memory is `calloc`ed and `.bss` is therefore zero, so an **uninitialised
+table would exit immediately** — `v0` would read 0 and the sentinel is 0. The
+loop spinning means the table holds *garbage*: non-zero next-indices that never
+reach the sentinel, most likely a chain that points back into itself.
+
+The prime suspect is the **28 bad memory accesses**. A structure initialiser
+whose writes landed outside mapped memory would leave exactly this: a header
+that looks plausible and a chain that goes nowhere. The 17 null dispatches and
+`libc:_getmodreent: no reent structure` are probably the same root cause seen
+from a different angle.
+
+## Next
+
+1. Log the address of every bad memory access with the function that made it.
+   That list is short (28) and one of them almost certainly writes this table.
+2. Dump the 16-byte entries at `$a0` when the loop is entered — whether the
+   chain self-references or runs off the end says which write went missing.
+3. Only then go back to the GE. The 240 undecoded commands and `vtype == 0`
+   are downstream of this: the game never gets far enough to submit geometry.
