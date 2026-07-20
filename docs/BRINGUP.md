@@ -2313,3 +2313,46 @@ Fixed and shipped this session:
 Open: an uninitialised circular list at `s0 + 184` reached from
 `0x00067E58`, with the constructors now running. Next steps in the section
 above.
+
+## Falsified: constructor ordering is not the issue
+
+Running the eight constructors from inside start-up (at `0x00018318`, after
+`module_start` has begun) instead of before it:
+
+```
+                    before module_start    inside start-up
+back-edge           0x00067E58             0x00067E58
+bad accesses        22                     22
+dispatch misses     19                     19
+```
+
+Identical. Reading 1 from the previous section is dead: **when** the
+constructors run does not matter, so they do not depend on runtime state that
+`module_start` establishes.
+
+A useful detail from the failed first attempt: watching `0x00018334` fired
+nothing, because that address is not a label. The run then silently behaved as
+if constructors were disabled -- and reproduced the *old* hang at `0x0004DD14`
+with 0 bad accesses, which is a neat independent confirmation that the
+constructors are what moves execution past it.
+
+That also shows the label-watch blind spot is still live for non-label
+addresses. `psp_trace_watch_label` fires only on emitted labels; anything else
+is silently inert. The guard that would say so up front is still worth adding.
+
+## What remains
+
+The list at `s0 + 184` walked from `0x00067E58` is uninitialised even with
+constructors run. Its head should be self-referential and reads as garbage
+instead, so the string compare at `0x000122B4` follows nonsense pointers -- the
+22 bad accesses.
+
+Since ordering is ruled out and the constructor table is fully walked, the
+initialiser for *this* structure is either:
+
+- a ninth constructor in a table not yet found (only one null-terminated array
+  was located; a second `.init_array` would look identical), or
+- an ordinary function that start-up reaches only after the current stall.
+
+The second is the more likely and the cheaper to check: mark-test whether the
+code between `0x00018318` and the stall contains an initialiser for it.
