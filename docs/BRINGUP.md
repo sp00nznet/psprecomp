@@ -2898,3 +2898,39 @@ code, no allocation of the array''s size, and no write to its base -- so the
 pointer is derived from one of the five pools by arithmetic. Watching the
 allocator''s return values and following which pool contains `0x00415B68` names
 the owner, and the owner is what should be constructing the elements.
+
+## Correction: the allocations are five 32-byte requests
+
+The earlier figures (8.6 MB, 2.15 MB, ...) were `$a1` read at `0x0000E06C`,
+which is not the size argument there -- `0x0000E06C` takes the size in `$a0`
+and passes it on as `$a1` to `0x0000E0AC`. Reading the right register:
+
+```
+alloc #1: size=32  from fn 0x000743F0
+alloc #2: size=32  from fn 0x000123A4
+alloc #3: size=32  from fn 0x000123A4
+alloc #4: size=32  from fn 0x000123A4
+alloc #5: size=32  from fn 0x000123A4
+```
+
+Five 32-byte allocations, nothing else. **No pools, and no allocation of the
+array''s 31,960 bytes.** So the seventeen-object array at `0x00415B68` is not
+heap memory at all -- it is a static array in `.bss`, and a static array of C++
+objects is constructed by a **static constructor**.
+
+Which narrows the remaining question sharply: the constructor table has exactly
+eight entries, all eight run, and none of them writes `0x00415B68`. So one of
+those eight is bailing out before it constructs the array.
+
+That is a small, bounded search: watch each of the eight in turn, find the one
+whose job includes this array, and read where it stops. Every earlier candidate
+-- missing pools, failed allocation, a second constructor table, heap
+exhaustion -- is now ruled out by measurement rather than argument.
+
+### On the register mistake
+
+`$a1` looked like a plausible size field and produced plausible-looking numbers
+(8.6 MB reads like a texture pool), which is exactly why it went unquestioned
+for a round. The check that caught it was reading the callee''s prologue to see
+which register it actually consumes. Plausible output is not verification --
+this document now contains four separate instances of the same error.
