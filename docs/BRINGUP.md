@@ -1511,3 +1511,41 @@ applying to any `jal` target that looks unfamiliar.
 Find the `sbrk` the allocator falls back to, and watch it. If it never runs,
 the allocator is failing before it asks for memory; if it runs and returns
 failure, the fault is in the HLE''s partition allocator rather than in the game.
+
+## The kernel allocator is implemented and never called
+
+`sceKernelAllocPartitionMemory` (NID `0x237DBD4F`) is registered in
+`src/hle/sysmem.c` and works. Searching every run''s stderr across this session:
+
+```
+Partition | MaxFree | TotalFree  ->  no matches, any run
+```
+
+The game **never asks the kernel for memory**. So the allocator is not failing
+because the HLE denied it a heap -- it fails before it ever gets that far.
+
+That eliminates the most attractive remaining candidate and inverts the
+question again: a dlmalloc with empty free lists should call `sbrk`, and `sbrk`
+on PSP should reach the kernel. Neither happens. The allocator is bailing out
+*before* attempting to grow the heap, which points at a guard -- a check on
+some "initialised" flag or a null pointer in the reent -- that returns failure
+without ever trying.
+
+That is consistent with the `$k0` finding and explains why setting `$k0` alone
+changed nothing: the pointer chain became valid, but the structure behind it is
+still empty, and the allocator checks before it asks.
+
+## The state of the search
+
+Confirmed by measurement, not inference:
+
+- The 32-byte allocation returns null; the success path never runs.
+- `sceKernelAllocPartitionMemory` is never called.
+- `$k0` is zero; setting it is necessary and insufficient.
+- Everything downstream -- unbuilt subsystems, null vptrs, the self-looping
+  chain walk -- follows from that single failed allocation.
+
+The remaining question is narrow and well-posed: **which check inside
+`0x0000E0AC`/`0x0000E4DC` fails before `sbrk` is reached?** Reading the branches
+between entry and the first `jal` in `0x0000E4DC` answers it, and the offsets it
+tests on `$s4`/`$s2` name the reent fields that must be populated.
