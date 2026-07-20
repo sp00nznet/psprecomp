@@ -1676,3 +1676,47 @@ comes back to `0x000743F8`. Put watches at a handful of addresses spread
 through the allocator, see which are reached, and narrow to the block that
 decides. That is the same technique that found the constructor tier boundary in
 one turn after inference had failed for several.
+
+## The bisect was invalid: watches only fire on function bodies
+
+`0x0000E5B8` and `0x0000E99C` both reported "not reached". Both results are
+**artifacts**. Neither address has a `psp_body_*`; they are labels inside
+`psp_body_0000E4DC`, and `PSP_ENTER` -- which is what `psp_trace_watch` hooks --
+is emitted once per body with the *function''s* address. A watch on an interior
+label can never fire.
+
+So the watch tool silently reports "not reached" for any address that is not a
+function entry, which is indistinguishable from a real negative. Every "never
+ran" result in this document was on a genuine entry and stands; but the tool
+needs a guard, and until it has one, **check `psp_body_<addr>` exists before
+trusting a negative.**
+
+## Measured: the allocator receives a stack address as its reent
+
+Watching real entries:
+
+```
+0x0000E0AC  REACHED  a0=0x09FFFC20  s0=0x00000020
+0x0000E4DC  REACHED  a0=0x09FFFC20  s0=0x00000020
+```
+
+`s0 = 32` is the requested size, correct. `a0` is the reent pointer, and
+`0x09FFFC20` is **at the top of RAM, in stack territory** -- the stall report
+showed `sp = 0x09FFFAB0`, a few hundred bytes below it.
+
+A newlib reent carries the malloc arena and must live in static or heap memory.
+A pointer into the stack cannot be a valid one: whatever is there is either
+uninitialised or about to be overwritten by the next deep call. That is exactly
+consistent with an allocator that finds no usable free lists and returns null.
+
+Note also that the host now sets `$k0 = 0x08800000` with `*(k0+4) =
+0x08800100`, yet the allocator receives `0x09FFFC20`. So this reent is **not**
+coming from the thread-pointer path -- `_getmodreent` is returning something
+else, from its fallback.
+
+## Next
+
+Watch `0x0000DD24` (`_getmodreent`) and read `$v0` on return. It is a real
+entry, so the watch will fire. Three outcomes, all informative: it returns the
+stack address (the fallback is broken), it returns the TCB reent and something
+overwrites `a0` in between, or it is not the function feeding this call at all.
