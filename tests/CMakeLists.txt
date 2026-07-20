@@ -23,3 +23,7 @@ add_test(NAME crypto COMMAND test_crypto)
 add_executable(test_kirk test_kirk.c)
 target_link_libraries(test_kirk PRIVATE allegrex_core)
 add_test(NAME kirk COMMAND test_kirk)
+
+add_executable(test_emit test_emit.c)
+target_link_libraries(test_emit PRIVATE allegrex_core)
+add_test(NAME emit COMMAND test_emit)

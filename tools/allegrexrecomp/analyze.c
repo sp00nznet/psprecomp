@@ -61,6 +61,11 @@ typedef struct {
      * tail call from a local jump, and lets it stop when it runs off the end
      * of one function into the start of the next. */
     uint8_t    *entry_map;
+    /* Ownership of each word, and the entry of the function currently being
+     * traced. Recorded as the walk proceeds so the emitter knows exactly which
+     * instructions belong to which function. */
+    uint32_t   *owner;
+    uint32_t    cur_owner;
     u32list    *func_queue;
     u32list    *imports;
     u32list    *indirects;
@@ -93,6 +98,7 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
     if (u32_push(&blocks, entry) != 0) return -1;
 
     uint32_t end = entry;
+    uint32_t lo  = entry;
     uint32_t insns = 0;
     unsigned has_return = 0, has_indirect = 0, has_vfpu = 0;
 
@@ -116,9 +122,11 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
             a_insn in;
             a_decode(fetch(an, a), a, &in);
             c->seen[idx] |= SEEN_CODE;
+            c->owner[idx] = c->cur_owner;
             insns++;
             an->insns++;
             if (a + 4 > end) end = a + 4;
+            if (a < lo) lo = a;
 
             if (in.op == A_INVALID) {
                 /* Almost always data reached by a bad path. Stop this trace
@@ -139,12 +147,14 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                         a_insn din;
                         a_decode(fetch(an, d), d, &din);
                         c->seen[didx] |= SEEN_CODE;
+                        c->owner[didx] = c->cur_owner;
                         insns++;
                         an->insns++;
                         if (din.op == A_VFPU_UNKNOWN) { an->vfpu++; has_vfpu = 1; }
                         if (din.op == A_INVALID) an->invalid++;
                     }
                     if (d + 4 > end) end = d + 4;
+                    if (d < lo) lo = d;
                 }
             }
 
@@ -198,7 +208,7 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                  * function is still correct code reached through the dispatch
                  * table, whereas a wrongly merged one has bogus boundaries. */
                 if (in.has_target && a_in_range(an, in.target)) {
-                    if (in.target <= a && !is_known_entry(c, in.target)) {
+                    if (in.target <= a && a != entry && !is_known_entry(c, in.target)) {
                         u32_push(&blocks, in.target);          /* loop */
                     } else {
                         uint32_t ti = word_index(an, in.target);
@@ -221,6 +231,7 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
 
     memset(out, 0, sizeof *out);
     out->addr = entry;
+    out->start = lo;
     out->end = end;
     out->insns = insns;
     out->has_return = has_return;
@@ -248,8 +259,13 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     uint8_t *entry_map = (uint8_t *)calloc(nwords ? nwords : 1, 1);
     if (!entry_map) { free(seen); return -1; }
 
+    uint32_t *owner = (uint32_t *)malloc((nwords ? nwords : 1) * sizeof *owner);
+    if (!owner) { free(seen); free(entry_map); return -1; }
+    for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
+
     u32list queue = { 0 }, imports = { 0 }, indirects = { 0 };
-    walk_ctx ctx = { an, seen, entry_map, &queue, &imports, &indirects };
+    walk_ctx ctx = { an, seen, entry_map, owner, A_NO_OWNER,
+                     &queue, &imports, &indirects };
 
     /* Pass 1: establish the complete set of function entries before walking
      * anything. Both the tail-call test and the ran-off-the-end test need to
@@ -295,6 +311,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
         seen[idx] |= SEEN_ENTRY;
 
         a_func f;
+        ctx.cur_owner = entry;
         if (trace_function(&ctx, entry, &f) != 0) continue;
 
         if (nfuncs == cap) {
@@ -319,6 +336,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     an->indirects = indirects.v;
     an->nindirects = indirects.n;
 
+    an->owner = owner;
+    an->nwords = nwords;
+
     free(queue.v);
     free(seen);
     free(entry_map);
@@ -329,8 +349,10 @@ void a_analysis_free(a_analysis *an) {
     free(an->funcs);
     free(an->imports);
     free(an->indirects);
+    free(an->owner);
     an->funcs = NULL;
     an->imports = NULL;
     an->indirects = NULL;
+    an->owner = NULL;
     an->nfuncs = an->nimports = an->nindirects = 0;
 }

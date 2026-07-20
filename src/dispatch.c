@@ -1,0 +1,108 @@
+/* psprecomp — address → function dispatch. See include/psprecomp/dispatch.h. */
+
+#include "psprecomp/dispatch.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* An open-addressed hash table. A module has a few thousand functions and
+ * lookups happen on every indirect call, so this wants to be cheap; addresses
+ * are 4-aligned and densely clustered, which a power-of-two table with a
+ * multiplicative hash handles well. */
+
+typedef struct {
+    uint32_t addr;
+    psp_fn_t fn;
+    int      used;
+} slot;
+
+static slot   *g_table;
+static uint32_t g_cap;      /* always a power of two */
+static uint32_t g_count;
+static uint64_t g_misses;
+static psp_miss_fn_t g_miss;
+
+static uint32_t hash_addr(uint32_t a) {
+    /* Knuth multiplicative. The low two bits are always zero, so shift them
+     * out first or a quarter of the table would never be used. */
+    return (a >> 2) * 2654435761u;
+}
+
+static void grow(void) {
+    uint32_t ncap = g_cap ? g_cap * 2 : 4096;
+    slot *nt = (slot *)calloc(ncap, sizeof *nt);
+    if (!nt) return;
+
+    for (uint32_t i = 0; i < g_cap; i++) {
+        if (!g_table[i].used) continue;
+        uint32_t m = ncap - 1;
+        uint32_t j = hash_addr(g_table[i].addr) & m;
+        while (nt[j].used) j = (j + 1) & m;
+        nt[j] = g_table[i];
+    }
+    free(g_table);
+    g_table = nt;
+    g_cap = ncap;
+}
+
+void psp_register(uint32_t addr, psp_fn_t fn) {
+    if (!g_table || (g_count + 1) * 4 >= g_cap * 3) grow();   /* keep load < 0.75 */
+    if (!g_table) return;
+
+    uint32_t m = g_cap - 1;
+    uint32_t j = hash_addr(addr) & m;
+    while (g_table[j].used) {
+        if (g_table[j].addr == addr) { g_table[j].fn = fn; return; }  /* replace */
+        j = (j + 1) & m;
+    }
+    g_table[j].addr = addr;
+    g_table[j].fn = fn;
+    g_table[j].used = 1;
+    g_count++;
+}
+
+psp_fn_t psp_lookup(uint32_t addr) {
+    if (!g_table) return NULL;
+    uint32_t m = g_cap - 1;
+    uint32_t j = hash_addr(addr) & m;
+    while (g_table[j].used) {
+        if (g_table[j].addr == addr) return g_table[j].fn;
+        j = (j + 1) & m;
+    }
+    return NULL;
+}
+
+static void default_miss(uint32_t addr) {
+    fprintf(stderr,
+            "psprecomp: indirect call to 0x%08X, which is not a recompiled "
+            "function.\n"
+            "  Either discovery missed it, or it is data being called as code.\n",
+            addr);
+    abort();
+}
+
+void psp_set_miss_handler(psp_miss_fn_t fn) { g_miss = fn; }
+
+void psp_dispatch(uint32_t addr) {
+    psp_fn_t fn = psp_lookup(addr);
+    if (fn) { fn(); return; }
+
+    g_misses++;
+    /* Aborting by default is deliberate. A silently-ignored indirect call
+     * produces a program that runs and is wrong, which is far more expensive
+     * to debug than one that stops and names the address. A host that wants to
+     * survive misses during bring-up installs its own handler. */
+    (g_miss ? g_miss : default_miss)(addr);
+}
+
+uint32_t psp_dispatch_count(void)  { return g_count; }
+uint64_t psp_dispatch_misses(void) { return g_misses; }
+
+void psp_dispatch_reset(void) {
+    free(g_table);
+    g_table = NULL;
+    g_cap = g_count = 0;
+    g_misses = 0;
+    g_miss = NULL;
+}

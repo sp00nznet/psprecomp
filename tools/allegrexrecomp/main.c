@@ -13,6 +13,7 @@
 #include "container.h"
 #include "decode.h"
 #include "analyze.h"
+#include "emit.h"
 #include "keys.h"
 #include "crypto/kirk.h"
 
@@ -32,6 +33,7 @@ static int usage(void) {
         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
         "  allegrexrecomp cover   <file>\n"
         "  allegrexrecomp funcs   <file> [--list]\n"
+        "  allegrexrecomp emit    <file> <outdir> [prefix]\n"
         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
         "\n"
@@ -452,51 +454,65 @@ static int cmd_cover(const char *path) {
 
 /* ---- function discovery -------------------------------------------------- */
 
-static int cmd_funcs(const char *path, int list) {
-    psp_blob b;
-    if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
+/* Load a decrypted module and run discovery over it. On success the caller
+ * owns both `b` (psp_blob_free) and `an` (a_analysis_free). Shared by `funcs`
+ * and `emit`, which differ only in what they do with the result. */
+static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
+                             a_analysis *an, int *out_nseeds, int *out_nexports) {
+    if (psp_blob_read(path, b) != 0) { fprintf(stderr, "cannot read %s\n", path); return -1; }
 
-    elf_info e;
-    if (psp_sniff(b.data, b.size < 16 ? b.size : 16) != FMT_ELF ||
-        elf_parse(b.data, b.size, &e) != 0 || !e.text_size) {
+    if (psp_sniff(b->data, b->size < 16 ? b->size : 16) != FMT_ELF ||
+        elf_parse(b->data, b->size, e) != 0 || !e->text_size) {
         fprintf(stderr, "%s is not a decrypted ELF/PRX with code in it\n", path);
         fprintf(stderr, "(encrypted modules must be decrypted first — see docs/DECRYPT.md)\n");
-        psp_blob_free(&b);
-        return 1;
+        psp_blob_free(b);
+        return -1;
     }
 
-    a_analysis an;
-    memset(&an, 0, sizeof an);
-    an.code = b.data + e.text_offset;
-    an.base = e.text_addr;
-    an.size = e.text_size;
-    an.stub_addr = e.stub_addr;
-    an.stub_size = e.stub_size;
-    an.scan_calls = 1;
+    memset(an, 0, sizeof *an);
+    an->code = b->data + e->text_offset;
+    an->base = e->text_addr;
+    an->size = e->text_size;
+    an->stub_addr = e->stub_addr;
+    an->stub_size = e->stub_size;
+    an->scan_calls = 1;
 
     /* Seeds: the module entry point, plus every exported function. Exports
      * matter because a library entry that nothing internal calls is
      * unreachable from the entry point alone. */
     uint32_t seeds[544];
     int nseeds = 0;
-    seeds[nseeds++] = e.entry;
+    seeds[nseeds++] = e->entry;
 
     psp_module_info mi;
     int nexports = 0;
-    if (e.modinfo_size && psp_modinfo_parse(b.data, b.size, e.modinfo_offset, &mi) == 0) {
-        uint32_t bias = e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0;
-        nexports = psp_collect_exports(b.data, b.size, &mi, bias,
-                                       seeds + nseeds, (int)(sizeof seeds / sizeof seeds[0]) - nseeds);
-        if (nexports > (int)(sizeof seeds / sizeof seeds[0]) - nseeds)
-            nexports = (int)(sizeof seeds / sizeof seeds[0]) - nseeds;
+    const int cap = (int)(sizeof seeds / sizeof seeds[0]);
+    if (e->modinfo_size && psp_modinfo_parse(b->data, b->size, e->modinfo_offset, &mi) == 0) {
+        uint32_t bias = e->nsegments ? e->seg[0].offset - e->seg[0].addr : 0;
+        nexports = psp_collect_exports(b->data, b->size, &mi, bias,
+                                       seeds + nseeds, cap - nseeds);
+        if (nexports > cap - nseeds) nexports = cap - nseeds;
         nseeds += nexports;
     }
 
-    if (a_discover(&an, seeds, nseeds) != 0) {
+    if (a_discover(an, seeds, nseeds) != 0) {
         fprintf(stderr, "discovery failed (out of memory)\n");
-        psp_blob_free(&b);
-        return 1;
+        psp_blob_free(b);
+        return -1;
     }
+
+    if (out_nseeds)   *out_nseeds = nseeds;
+    if (out_nexports) *out_nexports = nexports;
+    return 0;
+}
+
+static int cmd_funcs(const char *path, int list) {
+    psp_blob b;
+    elf_info e;
+    a_analysis an;
+    int nseeds = 0, nexports = 0;
+
+    if (load_and_discover(path, &b, &e, &an, &nseeds, &nexports) != 0) return 1;
 
     printf("module:     %s\n", path);
     printf("code:       0x%08X + %u bytes  (%u instructions)\n",
@@ -532,7 +548,7 @@ static int cmd_funcs(const char *path, int list) {
          * boundary is probably wrong, so those are counted rather than
          * averaged away. */
         uint32_t code = f->insns * 4;
-        uint32_t extent = f->end - f->addr;
+        uint32_t extent = f->end - f->start;
         if (extent > code * 2 + 64) scattered++;
         if (code > biggest) { biggest = code; biggest_addr = f->addr; }
     }
@@ -559,6 +575,46 @@ static int cmd_funcs(const char *path, int list) {
     a_analysis_free(&an);
     psp_blob_free(&b);
     return 0;
+}
+
+/* ---- the emitter --------------------------------------------------------- */
+
+static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
+    psp_blob b;
+    elf_info e;
+    a_analysis an;
+
+    if (load_and_discover(path, &b, &e, &an, NULL, NULL) != 0) return 1;
+
+    psp_module_info mi;
+    const char *module = "(unknown)";
+    if (e.modinfo_size && psp_modinfo_parse(b.data, b.size, e.modinfo_offset, &mi) == 0)
+        module = mi.name;
+
+    emit_opts o;
+    o.outdir = outdir;
+    o.prefix = prefix ? prefix : "recomp";
+    o.module = module;
+
+    printf("module:     %s\n", module);
+    printf("functions:  %d\n", an.nfuncs);
+    printf("imports:    %d\n\n", an.nimports);
+
+    int rc = a_emit(&an, &o);
+
+    if (rc == 0) {
+        /* The instructions the emitter could not translate are the honest
+         * measure of how far the output is from running. They are traps, not
+         * silence, so they will announce themselves — but knowing the count
+         * up front is better than discovering it one crash at a time. */
+        printf("\n%llu of %llu instructions are VFPU and emit as traps (%.2f%%).\n",
+               (unsigned long long)an.vfpu, (unsigned long long)an.insns,
+               an.insns ? 100.0 * (double)an.vfpu / (double)an.insns : 0.0);
+    }
+
+    a_analysis_free(&an);
+    psp_blob_free(&b);
+    return rc == 0 ? 0 : 1;
 }
 
 /* ---- decryption ---------------------------------------------------------- */
@@ -772,6 +828,10 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "ls"))      return cmd_ls(argv[2]);
     if (!strcmp(cmd, "cover"))   return cmd_cover(argv[2]);
     if (!strcmp(cmd, "funcs"))   return cmd_funcs(argv[2], argc > 3 && !strcmp(argv[3], "--list"));
+    if (!strcmp(cmd, "emit")) {
+        if (argc < 4) return usage();
+        return cmd_emit(argv[2], argv[3], argc > 4 ? argv[4] : NULL);
+    }
     if (!strcmp(cmd, "extract")) {
         if (argc < 5) return usage();
         return cmd_extract(argv[2], argv[3], argv[4]);

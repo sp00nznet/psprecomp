@@ -136,15 +136,25 @@ about being self-contained, which is a goal but not a gate.
       idiom that MIPS compilers emit for `switch`. 38 unresolved sites in
       Lumberjack. Unresolved tables become dispatch-table lookups rather than
       analysis failures.
-- [ ] **The delay-slot problem.** Every MIPS branch executes the following
-      instruction before the branch takes effect. The emitter must reorder or
-      duplicate it correctly, and likely-branches nullify theirs when not taken.
-      This is the single most error-prone part of MIPS recompilation and gets
-      its own test suite.
-- [ ] **The C emitter** — one `psp_func_<addr>` per routine, every line carrying
-      its address and disassembly as a comment, lowered to `recomp_rt.h`
-      helpers, intra-function flow as labels + `goto`, `jal` as a direct call,
-      indirect jumps through a dispatch table.
+- [x] **The delay-slot problem.** Ordinary branches capture their condition
+      into a temporary before the slot runs (so a slot that writes a compared
+      register cannot flip the branch); likely branches duplicate the slot into
+      the taken path; jumps, calls and returns hoist it. Asserted by
+      `tests/test_emit.c`.
+- [x] **The C emitter** — one `psp_func_<addr>` per routine, every line carrying
+      its address and disassembly, lowered to `recomp_rt.h` helpers, flow as
+      labels + `goto`, `jal` as a direct call, imports as named stubs, indirect
+      jumps through the dispatch table. Untranslated instructions emit named
+      run-time traps rather than silence.
+- [x] **Dispatch table** (`src/dispatch.c`) — open-addressed `addr -> psp_fn_t`,
+      with a miss handler that names the address instead of crashing.
+- [x] **Proven end to end on a real game.** Lumberjack emits 2206 functions /
+      256,566 lines, which compile with MSVC, link against the runtime, and run:
+      2212 functions registered and `module_start` resolves through the table.
+      Two edge cases the real module forced, each producing exactly one compile
+      error in a quarter-million lines: a delay slot that is also a branch
+      target (must be emitted twice), and a function owning instructions
+      *below* its entry point (so functions carry a `start` as well as an `end`).
 - [ ] **Hints file** — per-title force-code/force-data, function names, and
       HLE overrides, so a title's hard-won analysis is data rather than a patch.
 

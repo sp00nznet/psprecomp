@@ -200,6 +200,52 @@ static inline void psp_swr(uint32_t val, uint32_t addr) {
     psp_write32(base, (psp_read32(base) & PSP_SWR_MASK[b]) | (val << PSP_SWR_SHIFT[b]));
 }
 
+/* ---- COP1, single precision --------------------------------------------- */
+
+/* `mtc1`/`mfc1` move raw bits between the integer and FP register files — they
+ * are not conversions. Going through a union keeps that explicit and avoids
+ * the strict-aliasing violation a pointer cast would introduce. */
+static inline float psp_bits_to_f32(uint32_t b) {
+    union { uint32_t u; float f; } c;
+    c.u = b;
+    return c.f;
+}
+
+static inline uint32_t psp_f32_to_bits(float v) {
+    union { uint32_t u; float f; } c;
+    c.f = v;
+    return c.u;
+}
+
+static inline float psp_fabs(float v)  { return v < 0.0f ? -v : v; }
+
+/* Newton-Raphson would be faster but the host FPU is exact and this is not the
+ * hot path in any recompiled game; correctness first. */
+static inline float psp_fsqrt(float v) {
+    if (v <= 0.0f) return 0.0f;
+    float g = v;
+    for (int i = 0; i < 24; i++) g = 0.5f * (g + v / g);
+    return g;
+}
+
+/* `c.<cond>.s` condition codes. The distinction that matters is *ordered* vs
+ * *unordered*: with a NaN operand the ordered forms are false and the
+ * unordered forms are true. Comparisons involving NaN are false in C, so the
+ * NaN case is tested explicitly rather than assumed. */
+static inline int psp_fcmp(unsigned cond, float a, float b) {
+    const int unordered = (a != a) || (b != b);   /* either is NaN */
+    switch (cond & 0xF) {
+    case 0x0: case 0x8: return 0;                              /* F, SF */
+    case 0x1: case 0x9: return unordered;                      /* UN, NGLE */
+    case 0x2: case 0xA: return !unordered && a == b;           /* EQ, SEQ */
+    case 0x3: case 0xB: return unordered || a == b;            /* UEQ, NGL */
+    case 0x4: case 0xC: return !unordered && a <  b;           /* OLT, LT */
+    case 0x5: case 0xD: return unordered || a <  b;            /* ULT, NGE */
+    case 0x6: case 0xE: return !unordered && a <= b;           /* OLE, LE */
+    default:            return unordered || a <= b;            /* ULE, NGT */
+    }
+}
+
 #ifdef __cplusplus
 }
 #endif

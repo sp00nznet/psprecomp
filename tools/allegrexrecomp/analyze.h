@@ -35,6 +35,10 @@ extern "C" {
 
 typedef struct {
     uint32_t addr;          /* function entry */
+    /* The address range actually touched. `start` is not always `addr`: a
+     * block can sit below the entry, and the emitter must iterate over
+     * everything the function owns rather than assuming it all lies forward. */
+    uint32_t start;
     uint32_t end;           /* one past the highest instruction reached */
     uint32_t insns;         /* instructions actually visited */
     unsigned has_return  : 1;   /* reaches a `jr $ra` */
@@ -80,7 +84,17 @@ typedef struct {
     uint64_t vfpu;
     uint64_t invalid;
     uint32_t bytes_reached;
+
+    /* Which function owns each word: the owning function's entry address, or
+     * A_NO_OWNER. The emitter needs this because a function's instructions are
+     * not necessarily contiguous — blocks get laid out apart from each other,
+     * and the gaps belong either to another function or to data. Emitting the
+     * whole [addr, end) range instead would pull in a neighbour's code. */
+    uint32_t *owner;
+    uint32_t  nwords;
 } a_analysis;
+
+#define A_NO_OWNER 0xFFFFFFFFu
 
 /* Run discovery. `seeds` are function entry addresses to start from (the
  * module entry point and its exports). Returns 0 on success.

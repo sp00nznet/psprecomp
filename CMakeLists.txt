@@ -34,6 +34,7 @@ endif()
 add_library(psprecomp STATIC
     src/cpu.c
     src/mem.c
+    src/dispatch.c
 )
 
 target_include_directories(psprecomp PUBLIC

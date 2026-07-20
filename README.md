@@ -59,7 +59,7 @@ the toolkit is the thing other people fork to recompile *their* PSP game.
           native executable — the recompiled game runs
 ```
 
-## Status — decrypting via bootstrap, and discovery runs on real modules
+## Status — a real PSP game recompiles to C that compiles, links and runs
 
 Phase 1 is done and it is real, not a skeleton. Pointed at a retail PSN dump of
 *WTF: Work Time Fun*, the tool walks the disc, identifies every layer, and
@@ -228,7 +228,80 @@ vtables, thread entries. The `.rel.text` relocation table (190 KB in Lumberjack)
 lists every address the loader patches, which is the principled way to recover
 them, and is the next step.
 
-**Not started yet:** the C emitter, the HLE library, the interpreter oracle.
+## The emitter — a real game compiles and links
+
+`allegrexrecomp emit` turns discovered functions into C. On Lumberjack it
+produces **2,206 functions across 256,566 lines**, and that output **compiles
+with MSVC, links against the runtime, and runs**:
+
+```
+$ gencheck.exe
+registered 2212 recompiled functions
+memory: 32 MB RAM, 2048 KB VRAM, 16 KB scratchpad
+module_start 0x000183AC -> resolved
+```
+
+That is the whole pipeline end to end: **disc → decrypt → discover → emit →
+compile → link → run.**
+
+The output is meant to be read:
+
+```c
+/* ---------------------------------------------------------------
+ * psp_func_000183AC  --  47 instructions, 188 bytes
+ * ------------------------------------------------------------- */
+void psp_func_000183AC(void) {
+    /* 000183AC  addiu      $sp, $sp, -16 */
+    r_sp = r_sp + -16;
+    /* 000183B4  sw         $s1, 4($sp) */
+    psp_write32(r_sp + 4, r_s1);
+    /* 000183C8  jal        0x00091F1C */
+    /* 000183CC  addu       $s0, $a1, $zero */
+    r_s0 = r_a1 + r_zero;          /* the delay slot, before the call */
+    psp_import_00091F1C();
+```
+
+### Delay slots
+
+Every MIPS branch executes the instruction *after* it before control
+transfers, and this is where recompilers get quietly wrong. Three cases, three
+treatments:
+
+| Form | Delay slot | Emitted as |
+|---|---|---|
+| ordinary branch | always runs | condition captured, then slot, then branch |
+| likely branch | runs only if taken | slot duplicated inside the taken path |
+| jump / call / return | always runs | slot hoisted above the transfer |
+
+The ordinary-branch case captures its condition into a temporary *first*:
+
+```c
+{ int _c = (r_v0 == r_zero);
+  r_v0 = r_v0 + 1;        /* delay slot writes the register just compared */
+  if (_c) goto L_08804018; }
+```
+
+Hoisting naively would compare the *new* `$v0` and take the wrong branch — once
+in a thousand iterations, in a game nobody can debug. The temporary costs
+nothing (the compiler folds it away when there is no dependency) and removes
+the entire class of bug. `tests/test_emit.c` asserts the ordering.
+
+Two more cases the real module forced, each producing exactly one compile
+error in a quarter of a million lines:
+
+- **A delay slot that is also a branch target.** It has to exist twice —
+  inlined with its branch, and standalone under its own label — with the
+  fall-through path jumping past the standalone copy.
+- **A function whose blocks lie *below* its entry.** A backward tail-call thunk
+  meant one function owned instructions at a lower address than its entry
+  point, so emitting from `addr` forward silently dropped them. Functions now
+  carry a `start` as well as an `end`.
+
+Anything not yet translated — the VFPU, 0.19% of instructions — emits a
+**named run-time trap**, never silence. A gap that announces itself is worth
+far more than one that produces a program which runs and is wrong.
+
+**Not started yet:** the HLE library, the interpreter oracle.
 
 ```
 # each Allegrex routine will become a readable C function; today the same
