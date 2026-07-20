@@ -1071,3 +1071,44 @@ that is supposed to build the seventeen sub-objects.**
    never executes, find its caller; if it does execute, find why its stores do
    not land.
 2. `0x00067824` is the remaining unexamined stride and should be read too.
+
+## The constructor loop never runs
+
+Watching `0x00067E34` directly:
+
+```
+NEVER RAN
+```
+
+Decisive, and it settles the shape of the bug. The seventeen sub-objects are
+not being built badly, or half-built, or built somewhere else -- **the pass that
+builds them is never entered.** Their vptr words are still the zero `.bss`
+started as, which is exactly what the dispatch loop at `0x00066C6C` then reads.
+
+That also retires the whole family of "the constructor ran but its stores did
+not land" theories, including the codegen suspicion raised a few sections
+above. Nothing landed because nothing ran.
+
+## Its two call sites
+
+```
+psp_func_00067E34() called from 0x00067E08
+                   called from 0x00067EF8
+```
+
+`0x00067E08` is a real function entry (`addiu $sp, $sp, -32`, saving `$ra` and
+`$s2`-`$s4`) sitting immediately before the loop. `0x00067EF8` is inside the
+loop body itself -- the back-edge, not an independent caller.
+
+So there is effectively **one** entry point into this pass, and the question is
+now one level up: does `0x00067E08` run, and if not, who was supposed to call
+it?
+
+## Next
+
+1. Watch `0x00067E08` the same way. One of two answers, both useful: if it also
+   never runs, walk up its callers until reaching code that *does* execute --
+   the break is at that boundary. If it does run, the loop is being skipped by a
+   guard, and that guard's condition is the bug.
+2. This is a mechanical walk now, not a search. Each step is a watch and a run,
+   and the answer is a yes or no rather than an inference.
