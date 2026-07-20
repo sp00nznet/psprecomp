@@ -9,6 +9,21 @@
 psp_memory psp_mem;
 uint64_t   psp_mem_bad_access;
 
+/* Watch writes to one address. "Which code writes this word" is a question
+ * that came up repeatedly and could only be answered by guessing; the write
+ * path is the one place that can answer it directly. */
+static uint32_t g_wwatch;
+static int g_whits;
+void psp_mem_watch_write(uint32_t addr) { g_wwatch = addr; g_whits = 0; }
+int psp_mem_watch_hits(void) { return g_whits; }
+
+static void note_write(uint32_t addr, uint32_t width) {
+    if (!g_wwatch || addr + width <= g_wwatch || addr > g_wwatch) return;
+    if (g_whits++ < 8)
+        fprintf(stderr, "write%u to 0x%08X (watch 0x%08X) from fn 0x%08X\n",
+                width * 8, addr, g_wwatch, psp_trace_last());
+}
+
 /* Bad accesses were only ever counted, which says an initialiser went wrong
  * without saying which one. The addresses are what identify it, and there are
  * few enough of them (28 in the current run) to simply print. */
@@ -99,6 +114,7 @@ float    psp_read_f32(uint32_t addr) { READ_BODY(float)  }
 #define WRITE_BODY(TYPE)                             \
     void *p = psp_mem_ptr(addr, (uint32_t)sizeof(TYPE)); \
     if (!p) { bad_access(addr, 1, (int)sizeof(TYPE)); return; }         \
+    note_write(addr, (uint32_t)sizeof(TYPE));                    \
     memcpy(p, &val, sizeof(TYPE));
 
 void psp_write8 (uint32_t addr, uint8_t  val) { WRITE_BODY(uint8_t)  }

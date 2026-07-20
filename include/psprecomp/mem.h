@@ -68,6 +68,8 @@ void *psp_mem_ptr(uint32_t addr, uint32_t size);
  * and bump psp_mem_bad_access — a recompiled game that starts faulting here is
  * telling you the analysis missed something, so it is counted, not ignored. */
 extern uint64_t psp_mem_bad_access;
+void psp_mem_watch_write(uint32_t addr);
+int psp_mem_watch_hits(void);
 
 uint8_t  psp_read8 (uint32_t addr);
 uint16_t psp_read16(uint32_t addr);

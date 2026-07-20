@@ -2058,3 +2058,64 @@ directly if one ever appears.
 
 Do not resume by patching tables. Two experiments now show that path does not
 converge.
+
+---
+
+# The list initialiser, and what actually walks the table
+
+A write-watch on the head index (`0x003EC394`, i.e. table `+16`) across a whole
+run:
+
+```
+NOTHING EVER WRITES IT
+```
+
+Scanning the image for `sh rt, 16(rs)` -- 16 sites in the module -- found the
+routine that would:
+
+```
+0004D730  addiu $v0, $zero, 1
+0004D734  sb    $v0, 12($s0)     ; used = 1
+0004D738  sh    $v0, 16($s0)     ; next = 1     <- the terminator
+0004D73C  sh    $v0, 14($s0)     ; prev = 1
+```
+
+An empty circular doubly-linked list: entries carry **prev at +14 and next at
++16, both 16-byte indices**, and an initialised-empty list points at itself with
+index 1. A virgin `.bss` table reads 0 in both, and 0 is a valid index, which is
+why the walk self-loops rather than stopping.
+
+Reachability along that path:
+
+```
+0x0004D694  never reached   (guards the init on 0x000761DC returning < 513)
+0x000761DC  never reached
+0x0004D6F0  never reached   (the list initialiser)
+0x0004DBB0  REACHED         (insert)
+0x0004DD14  REACHED         (walk)
+```
+
+**Insert and walk run; the initialiser and its entire guard path do not.** That
+is now measured on real entries at every level, not inferred.
+
+## What that means
+
+This is the same shape as the seventeen-constructor tier, and that one turned
+out to be *downstream* of the hang -- unreachable because the program had
+already stopped. The same explanation has to be tested here before assuming
+otherwise: `0x0004D694` may simply be scheduled after the call that hangs.
+
+If so, the ordering is the bug: the program walks a list it has not created
+yet, which on hardware would also spin. That points back at something earlier
+diverging -- and the first divergence found by this method was `0x00018354`
+calling into the subtree that never returns.
+
+## The specific next measurement
+
+Walk up from `0x0004D694` exactly as before, marking each level, until reaching
+a function that **is** reached. If that boundary is again "the statement after
+the call that hangs", the initialiser is downstream and the real fault is
+earlier still. If instead a reached function *skips* the call to
+`0x0004D694`, that branch is the bug.
+
+Do not shim the tables. Two experiments show it only reveals the next one.
