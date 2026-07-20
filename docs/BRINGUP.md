@@ -3031,3 +3031,48 @@ is already understood as far as its bucket selection.
 
 **Do not** re-derive "the allocation succeeds" from a reachability mark. Read
 `$s4`.
+
+## The heap request never reaches the kernel
+
+The game does ask for memory. `0x00000290` -- the only caller of the
+`sceKernelAllocPartitionMemory` stub -- runs, three times, with real sizes:
+
+```
+sbrk/heap-grow: a0=0x00834060  (8,601,824 bytes)
+sbrk/heap-grow: a0=0x0020D060  (2,150,496)
+sbrk/heap-grow: a0=0x000FA460  (1,025,120)
+```
+
+But instrumenting `hle_AllocPartitionMemory` directly produces **no output at
+all**, and `user memory free` stays at 20,840,448 for the whole run. The
+request is raised and never arrives.
+
+Its prologue says why it might not:
+
+```
+00000290  addiu $sp, $sp, -16
+00000298  lui   $s0, 0x3B
+0000029C  lw    $v1, 18564($s0)      ; v1 = *(0x003B4884)
+000002AC  bne   $v1, $zero, 0x00000328   ; already-initialised path
+000002B4  lui   $v1, 0x4B
+000002B8  addiu $a0, $v1, 372           ; a0 = 0x004B0174
+000002BC  beq   $a0, $zero, 0x000002DC
+```
+
+It reads a guard word at `0x003B4884` and, if zero, takes a first-time path
+that computes `0x004B0174`. That address is **four bytes past `memsz`**
+(`0x4B0180` is the module end -- `0x4B0174` is inside it, just). The heap this
+routine is establishing sits at the very top of the module image, which is
+exactly where a linker puts `_end` and where `sbrk` starts.
+
+So the shape is: first call sets up a heap based at the end of the module, and
+something in that path fails before the kernel call. Note `0x003B4884` is past
+`filesz` (`0x3B4880`) by four bytes -- it is the first word of `.bss`, so it
+reads zero, which is correct for a first-time guard.
+
+### Next
+
+Single-step `0x00000290` from its entry -- it is short, and only a handful of
+branches separate the entry from the import call. One of them diverts. This is
+the last link in the chain and the first one where the fault is plausibly in
+psprecomp rather than in the game.

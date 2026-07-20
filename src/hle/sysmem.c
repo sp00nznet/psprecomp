@@ -164,6 +164,9 @@ static void hle_AllocPartitionMemory(void) {
         if (align < 0x100) align = 0x100;
     }
 
+    fprintf(stderr, "AllocPartitionMemory: part=%u type=%u size=%u (%u free)\n",
+            psp_arg(0), type, size, psp_sysmem_free());
+
     uint32_t addr = 0;
     switch (type) {
     case PSP_SMEM_Low:
