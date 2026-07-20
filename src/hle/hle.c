@@ -116,7 +116,7 @@ const char *psp_str(uint32_t addr, char *dst, size_t cap) {
     return dst;
 }
 
-static void miss_context(void) { psp_hle_dump_recent(stderr); }
+static void miss_context(void) { psp_trace_dump(); psp_hle_dump_recent(stderr); }
 
 void psp_hle_init(void) {
     psp_set_miss_context(miss_context);

@@ -37,6 +37,19 @@ void psp_dispatch(uint32_t addr);
 /* Called when psp_dispatch hits an unregistered address. The default prints
  * the address and aborts; a host can override it to log and continue, which is
  * useful while discovery is still incomplete. */
+/* ---- function-entry trace ------------------------------------------------
+ * Generated functions call psp_trace_enter() on entry when the code is built
+ * with PSPRECOMP_TRACE; otherwise the call compiles away entirely.
+ *
+ * This exists because a dispatch miss reports the bad *target* and says
+ * nothing about who jumped there. Recompiled functions are ordinary C, so the
+ * information is on the host stack — but reading it portably is more trouble
+ * than recording it, and a short history of entered functions also shows how
+ * the code arrived, not just where it was. */
+void psp_trace_enter(uint32_t addr);
+void psp_trace_dump(void);
+void psp_trace_reset(void);
+
 /* Optional hook that prints extra context when a dispatch miss happens. The
  * HLE layer installs one so a wild pointer is reported alongside the firmware
  * calls that recently returned zero -- dispatch itself must not depend on the

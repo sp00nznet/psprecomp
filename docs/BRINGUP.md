@@ -81,6 +81,64 @@ did.
 The missing module registration remains real and should still be fixed by a
 loader — it is simply not fatal, and not the thing to chase first.
 
+## FOUND: there is executable code outside `.text`
+
+A function-entry trace (build the generated code with `PSPRECOMP_TRACE`) names
+the caller instead of only the bad target. The last function entered before the
+first miss is `psp_func_000182F4`:
+
+```
+000182F4  lui   $a0, 0x3B
+          addiu $a0, $a0, 12260     -> 0x003B2FE4
+          addiu $a1, $a1, 12292     -> 0x003B3004
+          addiu $a2, $a2, 18544     -> 0x003B4870
+          j     0x000181B0          tail call, with $a3 also 0x003B4870
+```
+
+Two (start, end) pairs handed to a loop: the shape of a static-initializer
+runner walking an init/fini array.
+
+`0x003B2FE4..0x003B3004` holds eight pointers — to `0x003B2AF8`, `0x003B2B40`,
+`0x003B2B7C`, and five more. And those addresses contain **code**:
+
+```
+0x003B2B40:  27BDFFF0   addiu $sp, $sp, -16     a function prologue
+             AFBF000C   sw    $ra, 12($sp)
+             0C013074   jal   ...
+```
+
+`.text` is `0x00000000..0x00091E54`. These constructors sit at `0x003B2AF8+`,
+which is inside `.data`. **The toolkit analyses and emits `.text` only**, so
+they were never discovered, never emitted and never registered — and the
+runner calls straight into them.
+
+That is the failure. It is not a wild pointer at all: the pointers are correct,
+and the code they point at is real. It is simply code the recompiler never
+looked at.
+
+The earlier "garbage targets near address 8" reading was a coincidence of
+byte-searching: those values also occur as unaligned spans inside `.text`, which
+made them look like misaligned reads of code. They are better explained as
+instruction words from the uncovered `.data` region being treated as addresses
+once execution derails.
+
+### What this needs
+
+Discovery and emission must cover code wherever it lives, not just `.text`.
+Concretely:
+
+- Seed from the init/fini arrays, which are identifiable from the runner or
+  from the `.rodata`/`.data` relocations that populate them.
+- Allow the analysed extent to include regions outside `.text` rather than
+  assuming one contiguous code range (`a_analysis` currently takes a single
+  base/size).
+- Keep the existing validation: a candidate region is only code if it decodes
+  cleanly, so widening the range does not mean decoding all of `.data`.
+
+This is a structural change to the analyser, not a stub or a table fix, and it
+is on the critical path to running the game — the constructors must execute
+before `main` does anything useful.
+
 ## What is actually still open
 
 With the reent warning eliminated as the cause, the wild pointer walk has **no

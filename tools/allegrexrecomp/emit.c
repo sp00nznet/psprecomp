@@ -513,6 +513,8 @@ static void emit_function(ectx *c, const a_func *fn) {
         fprintf(f, " * Contains a computed jump routed through the dispatch table.\n");
     fprintf(f, " * ------------------------------------------------------------- */\n");
     fprintf(f, "void psp_func_%08X(void) {\n", fn->addr);
+    /* Compiles away unless the generated code is built with PSPRECOMP_TRACE. */
+    fprintf(f, "    PSP_ENTER(0x%08Xu);\n", fn->addr);
 
     for (uint32_t a = fn->start; a < fn->end; a += 4) {
         if (!owned_by(an, a, owner)) continue;
@@ -648,6 +650,15 @@ static void emit_header(FILE *f, const a_analysis *an, const emit_opts *o) {
         "#include <psprecomp/vfpu.h>\n"
         "\n"
         "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
+        "\n"
+        "/* Build with -DPSPRECOMP_TRACE to record every function entry. Costs\n"
+        " * one store per call when on, and nothing at all when off. A dispatch\n"
+        " * miss then reports how the code arrived, not just where it went. */\n"
+        "#ifdef PSPRECOMP_TRACE\n"
+        "#  define PSP_ENTER(a) psp_trace_enter(a)\n"
+        "#else\n"
+        "#  define PSP_ENTER(a) ((void)0)\n"
+        "#endif\n"
         "\n"
         "/* Register aliases, so the generated code reads like the assembly. */\n",
         o->module ? o->module : "(unknown)", an->nfuncs, an->nimports);

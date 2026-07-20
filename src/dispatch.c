@@ -77,6 +77,36 @@ psp_fn_t psp_lookup(uint32_t addr) {
     return NULL;
 }
 
+/* ---- function-entry trace ------------------------------------------------ */
+
+#define TRACE_DEPTH 32
+static uint32_t g_trace[TRACE_DEPTH];
+static uint64_t g_trace_n;
+
+void psp_trace_enter(uint32_t addr) {
+    g_trace[g_trace_n % TRACE_DEPTH] = addr;
+    g_trace_n++;
+}
+
+void psp_trace_reset(void) { g_trace_n = 0; }
+
+void psp_trace_dump(void) {
+    if (!g_trace_n) {
+        fprintf(stderr, "  (no function trace -- build the generated code with "
+                        "PSPRECOMP_TRACE to enable it)\n");
+        return;
+    }
+    uint64_t n = g_trace_n < TRACE_DEPTH ? g_trace_n : TRACE_DEPTH;
+    fprintf(stderr, "  last %llu functions entered, newest first:\n",
+            (unsigned long long)n);
+    for (uint64_t i = 1; i <= n; i++) {
+        uint64_t k = (g_trace_n - i) % TRACE_DEPTH;
+        fprintf(stderr, "    psp_func_%08X\n", g_trace[k]);
+    }
+    fprintf(stderr, "  (%llu function entries total)\n",
+            (unsigned long long)g_trace_n);
+}
+
 static void default_miss(uint32_t addr) {
     fprintf(stderr,
             "psprecomp: indirect call to 0x%08X, which is not a recompiled "
