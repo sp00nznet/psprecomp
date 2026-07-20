@@ -2853,3 +2853,48 @@ That closes a question worth closing: rendering is not blocked by anything in
 the GE path. The rasterizer is tested and idle because the game has not asked
 it to draw, and it will not until start-up completes. No shortcut to pixels
 exists that bypasses the hang.
+
+## Every allocation the game makes
+
+```
+alloc #1: 8,601,600 bytes
+alloc #2: 2,150,400
+alloc #3: 1,025,024
+alloc #4: 2,560,000
+alloc #5: 1,536,000
+```
+
+Five, all large pools, ~15.9 MB total -- and the allocator works, so memory is
+not the constraint. **None is the 31,960 bytes (17 x 1880) the object array
+needs**, and a write-watch on the array base `0x00415B68` shows nothing writes
+it either.
+
+So the array sits in memory carved from one of those pools, and its seventeen
+elements are never constructed. Which is the same statement the chain already
+made, now confirmed from the allocation side rather than the walk side.
+
+## The state this session ends in
+
+Measured end to end, no inferred links:
+
+```
+the 17-element array at 0x00415B68 is never written
+  -> vptrs at +12 stay null
+  -> 0x00066C78 dispatches slot 3 to address 0, seventeen times
+  -> records 2..17 never constructed
+  -> record 3 reads a non-zero count from file data, defeating the guard
+     that correctly skips the all-zero record 2
+  -> 0x00067E58 walks a garbage list head and spins
+```
+
+`pixels written: 0`. And the GE decode above proves that is not a rendering
+problem: the game submits only `sceGuInit`''s state reset and never asks to
+draw, so nothing downstream of the hang can produce pixels.
+
+### The next measurement
+
+Find what computes `0x00415B68`. There is no `lui 0x0041` in the generated
+code, no allocation of the array''s size, and no write to its base -- so the
+pointer is derived from one of the five pools by arithmetic. Watching the
+allocator''s return values and following which pool contains `0x00415B68` names
+the owner, and the owner is what should be constructing the elements.
