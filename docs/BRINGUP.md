@@ -3076,3 +3076,41 @@ Single-step `0x00000290` from its entry -- it is short, and only a handful of
 branches separate the entry from the import call. One of them diverts. This is
 the last link in the chain and the first one where the fault is plausibly in
 psprecomp rather than in the game.
+
+## The branch that skips the kernel call
+
+```
+000002B8  addiu $a0, $v1, 372          ; a0 = 0x004B0174
+000002BC  beq   $a0, $zero, 0x000002DC
+000002C4  lw    $a3, 372($v1)          ; a3 = *(0x004B0174)
+000002C8  beq   $a3, $zero, 0x00000368  ; <-- ZERO: skip the kernel entirely
+000002D0  sll   $s1, $a3, 10           ; s1 = a3 * 1024  -> size in KB
+...
+000002F0  jal   0x00091F14             ; sceKernelAllocPartitionMemory
+```
+
+`*(0x004B0174)` is the **heap size in kilobytes**, shifted left by 10 to become
+bytes. It is zero, so `beq` at `0x000002C8` is taken and the allocation call at
+`0x000002F0` is never reached. That is the whole reason the kernel never sees a
+request.
+
+`0x004B0174` sits twelve bytes before the module end (`memsz 0x4B0180`) and well
+past `filesz` (`0x3B4880`), so it is `.bss` -- zero unless something writes it.
+Nothing does.
+
+This is the PSP SDK''s heap-size variable, the one `PSP_HEAP_SIZE_KB()` defines.
+On hardware the **loader** supplies it: it is part of the module''s declared
+parameters, not something the module computes for itself. A recompiled module
+loaded by a host that does not know about it gets zero, takes the
+"no heap configured" branch, and every allocation afterwards fails.
+
+**This is a psprecomp gap, not a game bug** -- the first one in this chain that
+is. And it is the same class as the static constructors: a responsibility that
+belongs to the loader, invisible because the module contains the consumer but
+never the provider.
+
+### Next
+
+Find how the heap size is declared -- module info, an export, or a known symbol
+-- and have the loader write it before entry. Then re-run: the allocation should
+reach `hle_AllocPartitionMemory`, which is implemented and has 20 MB free.
