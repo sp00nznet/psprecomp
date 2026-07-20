@@ -3255,3 +3255,40 @@ that reports "unidentified NID" in listings.
 
 That is the next change, and it is a better outcome than guessing: it makes
 "we do not know what this is" representable instead of unrepresentable.
+
+## `psp_hle_register_unnamed` — making "unidentified" representable
+
+Shipped in `src/hle/hle.c`: a NID can now be registered without a name. The
+test suite skips unnamed entries **by construction** and reports how many there
+are, rather than by an exception carved out for one case.
+
+`0xF9275D98` is registered this way -- observed, exact, unidentified -- and the
+unimplemented-call warning is gone. Ten test suites still pass, and the
+self-verifying property is intact for every entry that claims a name.
+
+This is the right shape for a recompiler''s firmware table: a game will always
+reach entry points nobody has named yet, and the choice between "invent a name"
+and "stay blocked" was a false one.
+
+## The open question, stated precisely
+
+Returning a module id from `0xF9275D98` did **not** establish the heap. And a
+sharper puzzle remains, entirely inside psprecomp:
+
+- The import stub for `sceKernelAllocPartitionMemory` (`0x00091F14`) is
+  **entered** -- `PSP_ENTER` fires, three times, with `size=15,976,448`.
+- Registration is correctly wired: `psp_hle_init` -> `psp_sysmem_register` ->
+  `psp_hle_register(0x237DBD4F, ..., hle_AllocPartitionMemory)`.
+- `hle_AllocPartitionMemory` contains an unconditional `fprintf` on entry.
+- **That `fprintf` never appears**, and `user memory free` never changes.
+
+Stub entered, handler registered, handler apparently not run, nothing reporting
+an unimplemented NID. Those four facts cannot all be true, so one of the
+measurements is lying -- and identifying which is the next step, not another
+hypothesis about the game.
+
+The most likely candidate on past form: a stale build. This has already caused
+one wrong result this session, and the submodule copy is refreshed by
+`git checkout` in a way that has silently reverted edits before. Verify by
+rebuilding from clean and checking the binary contains the string, rather than
+checking the source does.

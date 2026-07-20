@@ -27,6 +27,26 @@ void psp_hle_register(uint32_t nid, const char *lib, const char *name, psp_hle_f
     g_count++;
 }
 
+/* Register a NID whose name is genuinely unknown.
+ *
+ * Every named entry is verified against SHA-1 of its own name, which is what
+ * makes the table self-checking -- and which correctly refuses a made-up name.
+ * But a firmware entry point can be *observed* without being *identified*: the
+ * game calls it, the NID is exact, and no plausible name hashes to it.
+ *
+ * The wrong response is to invent a name so the entry can be registered. That
+ * produces a table which runs, looks right, and lies about what it implements.
+ * The right response is to make "unidentified" representable: registered and
+ * callable, marked as unnamed, and skipped by the NID check by construction
+ * rather than by exception. */
+void psp_hle_register_unnamed(uint32_t nid, const char *lib, psp_hle_fn fn) {
+    psp_hle_register(nid, lib, NULL, fn);
+}
+
+int psp_hle_is_named(int index) {
+    return index >= 0 && index < g_count && g_entry[index].name != NULL;
+}
+
 const char *psp_hle_name(uint32_t nid) {
     for (int i = 0; i < g_count; i++)
         if (g_entry[i].nid == nid) return g_entry[i].name;

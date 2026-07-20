@@ -225,6 +225,12 @@ void psp_misc_register(void) {
     psp_hle_register(0x05572A5F, "LoadExecForUser", "sceKernelExitGame",             hle_ExitGame);
     psp_hle_register(0x4AC57943, "LoadExecForUser", "sceKernelRegisterExitCallback", hle_RegisterExitCallback);
 
+    /* Observed but unidentified. The game calls this three times on its
+     * heap-setup path, and an unimplemented call returns 0 -- which for a
+     * module query means "no module" and makes heap establishment fail.
+     * Eighteen plausible ModuleMgr names were tried against SHA-1 with no
+     * match, so the name is genuinely unknown and is not invented here. */
+    psp_hle_register_unnamed(0xF9275D98, "ModuleMgrForUser", hle_GetModuleId);
     psp_hle_register(0xF0A26395, "ModuleMgrForUser", "sceKernelGetModuleId",          hle_GetModuleId);
     psp_hle_register(0xD8B73127, "ModuleMgrForUser", "sceKernelGetModuleIdByAddress", hle_GetModuleIdByAddress);
     psp_hle_register(0x50F0C1EC, "ModuleMgrForUser", "sceKernelStartModule",          hle_ModuleOk);

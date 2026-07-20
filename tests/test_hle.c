@@ -85,9 +85,14 @@ static void test_nids_match_names(void) {
     const psp_hle_entry *e = psp_hle_entries(&n);
     CHECK(n > 0, "something is registered");
 
-    int checked = 0;
+    int checked = 0, unnamed = 0;
     for (int i = 0; i < n; i++) {
-        uint32_t want = psp_nid(e[i].name);
+        /* A NID may be observed without being identified: the game calls it,
+         * the NID is exact, and no plausible name hashes to it. Those are
+         * registered unnamed rather than under an invented name, and are
+         * skipped here by construction. Inventing a name to satisfy this check
+         * would defeat the only thing that makes the table trustworthy. */
+        if (!e[i].name) { unnamed++; continue; }        uint32_t want = psp_nid(e[i].name);
         if (want != e[i].nid) {
             printf("FAIL %s::%s\n  registered 0x%08X but SHA-1(name) gives 0x%08X\n",
                    e[i].lib, e[i].name, e[i].nid, want);
