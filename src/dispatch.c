@@ -203,3 +203,17 @@ void psp_dispatch_reset(void) {
     g_misses = 0;
     g_miss = NULL;
 }
+
+/* The last loop back-edge taken.
+ *
+ * Entry tracing cannot see a body that loops after its last call: no function
+ * is entered, so the trace simply stops with the newest entry being some
+ * innocent function that already returned. That blind spot cost three rounds of
+ * disassembling the wrong code. Recording back-edges closes it -- a spinning
+ * loop keeps writing here even though nothing else moves. */
+static uint32_t g_loop_addr;
+static uint64_t g_loop_hits;
+
+void psp_trace_loop(uint32_t addr) { g_loop_addr = addr; g_loop_hits++; }
+uint32_t psp_trace_loop_addr(void) { return g_loop_addr; }
+uint64_t psp_trace_loop_hits(void) { return g_loop_hits; }

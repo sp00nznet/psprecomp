@@ -578,3 +578,57 @@ already holds this -- `0x0004DD14` was newest -- but that function was measured
 entering once and exiting immediately, so the newest *entry* is not the
 stalling *body*. A body that loops after its last call is invisible to entry
 tracing, which is the gap to close.
+
+---
+
+# The loop, found
+
+Recording loop back-edges (`PSP_LOOP`, 961 sites) closes the blind spot that
+cost several rounds. First run with it:
+
+```
+last loop back-edge: 0x0004DD14 (10,020,314,003 hits)
+```
+
+Ten billion iterations of a single back-edge, from **one** entry to the
+function. That is the hang, and it is the chain walk after all.
+
+## My earlier measurement was wrong, not the theory
+
+The chain-walk theory was recorded as falsified because a dump said the walk
+"hits sentinel" on its first step. That dump hard-coded the sentinel as
+`psp_read16(a0 + 24)`. The real sentinel is **`$t2`, set to the constant 1** at
+`0x0004DCFC`:
+
+```
+0004DCFC  addiu $t2, $zero, 1
+...
+0004DD40  lhu  $v0, 16($t0)          ; next index
+0004DD44  bnel $v0, $t2, 0x0004DD14  ; loop while next != 1
+0004DD48  sll  $a2, $v0, 4           ; delay: offset = next * 16
+```
+
+So the walk terminates on next == **1**, not 0. The table's next-fields are
+**0**, so index 0 computes offset 0, reads its own next-field, gets 0 again, and
+loops forever pointing at itself.
+
+Measuring the wrong quantity is worse than not measuring: it retired a correct
+theory and sent the search elsewhere for several rounds. The lesson is narrower
+than "measure" -- it is *derive the constant from the code, never assume it*.
+
+## The actual defect
+
+A hash table whose chain terminator is 1 has been left full of zeroes. Zero is a
+valid index, so an uninitialised table is not inert here -- it is a self-loop.
+Something that should fill those next-fields with 1 never ran, or ran against
+different memory.
+
+## Next
+
+1. Find what initialises this table. `0x0004DBB0` and `0x0004DC1C` manage it
+   (free-slot scan on `lbu 12(v1)`, insert at `s3 + s0*16`); the initialiser is
+   likely a sibling that runs at startup.
+2. Check whether that initialiser is among the 17 null dispatches -- a table
+   left zeroed is exactly what a skipped init call produces.
+3. Guard the walk during bring-up so a zeroed table stops instead of spinning;
+   that alone may carry execution past this point and into geometry.

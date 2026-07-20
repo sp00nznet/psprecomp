@@ -54,6 +54,9 @@ void psp_trace_dump(void);
 void psp_trace_reset(void);
 uint32_t psp_trace_last(void);
 void psp_trace_watch(uint32_t addr, void (*fn)(uint32_t));
+void psp_trace_loop(uint32_t addr);
+uint32_t psp_trace_loop_addr(void);
+uint64_t psp_trace_loop_hits(void);
 
 /* Optional hook that prints extra context when a dispatch miss happens. The
  * HLE layer installs one so a wild pointer is reported alongside the firmware

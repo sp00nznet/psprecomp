@@ -637,7 +637,8 @@ static void emit_function(ectx *c, const a_func *fn) {
                 if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "        "); }
                 if (in.is_call) fprintf(f, "        %s = 0x%08Xu;\n", RN[31], a + 8);
                 if (owned_by(an, in.target, owner))
-                    fprintf(f, "        goto L_%08X;\n", in.target);
+                    { if (in.target <= a) fprintf(f, "        PSP_LOOP(0x%08Xu);\n", in.target);
+                      fprintf(f, "        goto L_%08X;\n", in.target); }
                 else
                     { emit_static_call(c, in.target); fprintf(f, "        return;\n"); }
                 fprintf(f, "    }\n");
@@ -657,7 +658,8 @@ static void emit_function(ectx *c, const a_func *fn) {
                 if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "      "); }
                 if (in.is_call) fprintf(f, "      %s = 0x%08Xu;\n", RN[31], a + 8);
                 if (owned_by(an, in.target, owner))
-                    fprintf(f, "      if (_c) goto L_%08X; }\n", in.target);
+                    { if (in.target <= a) fprintf(f, "      if (_c) PSP_LOOP(0x%08Xu);\n", in.target);
+                      fprintf(f, "      if (_c) goto L_%08X; }\n", in.target); }
                 else {
                     fprintf(f, "      if (_c) { ");
                     if (is_import(an, in.target))      fprintf(f, "psp_import_%08X();", in.target);
@@ -793,8 +795,10 @@ static void emit_header(FILE *f, const a_analysis *an, const emit_opts *o) {
         " * miss then reports how the code arrived, not just where it went. */\n"
         "#ifdef PSPRECOMP_TRACE\n"
         "#  define PSP_ENTER(a) psp_trace_enter(a)\n"
+        "#  define PSP_LOOP(a)  psp_trace_loop(a)\n"
         "#else\n"
         "#  define PSP_ENTER(a) ((void)0)\n"
+        "#  define PSP_LOOP(a)  ((void)0)\n"
         "#endif\n"
         "\n"
         "/* Register aliases, so the generated code reads like the assembly. */\n",
