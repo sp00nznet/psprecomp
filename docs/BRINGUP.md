@@ -414,3 +414,48 @@ keep being re-proposed.
    the measurement that should have been taken before either of the two theories
    above — both were reasoning about the binary rather than reading it.
 2. Chase the unaligned `0x0C0247C5` from `0x0000F3C0`.
+
+---
+
+# Falsified: the unterminated chain walk
+
+Taking the measurement instead of reasoning about it, via a new one-shot
+function-entry watch (`psp_trace_watch`), which dumps arguments for one
+function out of thousands without rebuilding the generated code:
+
+```
+chain walk: a0=0x003EC384 a1=0x09FFFAE8 a2=0x00000000 a3=0x003C61E0
+  t1(key)=0x04153FFF t2(sentinel)=0x0000
+  [ 0] off=0x000000 key=0x00000000 val=0x00000000 next=0x0000
+  -> hits sentinel
+```
+
+**The loop exits on its first iteration.** `0x0004DD14` is not the hang. It is
+simply the last function *entered* before everything stopped, which is a
+different claim entirely — and one I conflated with "where it is stuck" across
+two rounds of disassembly.
+
+The stall is therefore in a caller — `0x0004DCF8`, `0x0004DBB0`, or above —
+looping without entering any traced function. `0x0004DBB0` contains a bounded
+loop (`slti $s0, 1026`) whose counter would spin forever if it never advanced;
+that is the next thing to read, and it should be read with a watch rather than
+guessed at.
+
+## Three falsifications, one lesson
+
+VFPU garbage, lost structure writes, unterminated chain walk. Each was
+plausible, each cost one run, and **each came from reasoning about the binary
+rather than measuring it.** The one measurement that settled the question took
+less effort than any of the three theories that preceded it.
+
+The trace's "newest first" ordering caused real confusion here too: the last
+entry in a redirected log is the *oldest* of the last 32, and reading it the
+wrong way sent two rounds of disassembly into leaf helpers that were never
+involved.
+
+## What is actually known
+
+- Execution stalls at exactly 470 function entries, reproducible at 20s and 60s.
+- The stall is a loop containing **no calls of any kind** -- not dispatch (38
+  indirect calls total), not firmware (first-call logs only).
+- It is above `0x0004DD14` in the call chain, which returns normally.

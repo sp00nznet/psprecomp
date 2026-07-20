@@ -103,7 +103,19 @@ psp_fn_t psp_lookup(uint32_t addr) {
 static uint32_t g_trace[TRACE_DEPTH];
 static uint64_t g_trace_n;
 
+/* A one-shot hook on entry to a specific function. Bring-up repeatedly needs
+ * to see the arguments to one function out of thousands, and rebuilding the
+ * generated code with a printf in it is both slow and easy to leave behind. */
+static uint32_t g_watch_addr;
+static void (*g_watch_fn)(uint32_t);
+
+void psp_trace_watch(uint32_t addr, void (*fn)(uint32_t)) {
+    g_watch_addr = addr;
+    g_watch_fn = fn;
+}
+
 void psp_trace_enter(uint32_t addr) {
+    if (addr == g_watch_addr && g_watch_fn) g_watch_fn(addr);
     g_trace[g_trace_n % TRACE_DEPTH] = addr;
     g_trace_n++;
 }
