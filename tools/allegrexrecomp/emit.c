@@ -38,6 +38,20 @@ static void entry_push(ectx *c, uint32_t a) {
     c->entries[c->nentries++] = a;
 }
 
+/* vfim carries a half-precision float. Expanding it here keeps the runtime
+ * dealing only in single precision. */
+static float half_to_float(uint16_t h) {
+    const uint32_t sign = (uint32_t)(h >> 15) << 31;
+    const uint32_t exp  = (h >> 10) & 0x1F;
+    const uint32_t man  = h & 0x3FF;
+    uint32_t bits;
+    if (exp == 0)        bits = sign | (man ? ((127 - 15 + 1) << 23) | (man << 13) : 0);
+    else if (exp == 31)  bits = sign | 0x7F800000u | (man << 13);
+    else                 bits = sign | ((exp + 127 - 15) << 23) | (man << 13);
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
 /* ---- helpers ------------------------------------------------------------- */
 
 static uint32_t widx(const a_analysis *an, uint32_t addr) {
@@ -400,6 +414,24 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         }
         break;
     }
+
+    /* Constant generators. These carry no source operand: what they produce is
+     * encoded in the register number (vidt) or an index (vcst). */
+    case A_VIDT:
+        fprintf(f, "%spsp_vidt(%u, %u);\n", ind, in->vd, in->vsize);
+        return;
+    case A_VCST:
+        fprintf(f, "%spsp_vcst(%u, %u, %u);\n", ind, in->vd, in->vs, in->vsize);
+        return;
+
+    /* Immediate loads: the value is in the instruction, not a register. */
+    case A_VIIM:
+        fprintf(f, "%spsp_vimm(%u, %.1ff);\n", ind, in->vd, (double)in->imm);
+        return;
+    case A_VFIM:
+        fprintf(f, "%spsp_vimm(%u, %.9gf);\n", ind, in->vd,
+                (double)half_to_float((uint16_t)in->imm));
+        return;
 
     /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
     case A_VMMUL:

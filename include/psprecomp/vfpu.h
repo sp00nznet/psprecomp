@@ -82,6 +82,9 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size);
 /* Matrix ops that need no multiply: identity, zero, one, and copy. `size` is
  * the matrix order (2, 3 or 4). */
 void psp_vmidt(uint32_t vd, int size);
+void psp_vidt(uint32_t vd, int size);
+void psp_vimm(uint32_t vd, float value);
+void psp_vcst(uint32_t vd, uint32_t which, int size);
 void psp_vmzero(uint32_t vd, int size);
 void psp_vmone(uint32_t vd, int size);
 void psp_vmmov(uint32_t vd, uint32_t vs, int size);

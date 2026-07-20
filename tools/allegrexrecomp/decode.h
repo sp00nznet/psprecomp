@@ -96,6 +96,8 @@ typedef enum {
     A_VMMOV, A_VMIDT, A_VMZERO, A_VMONE,
     /* Any VFPU encoding we recognise as VFPU but do not yet name. Emitting
      * these is a hard error rather than a silent wrong answer. */
+    A_VIIM,
+    A_VFIM,
     A_VFPU_UNKNOWN,
 
     A_NOP,          /* canonical: sll $zero, $zero, 0 */

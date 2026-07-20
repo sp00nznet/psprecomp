@@ -241,6 +241,8 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VPFXS]    = { "vpfxs",    F_UNKNOWN },
     [A_VPFXT]    = { "vpfxt",    F_UNKNOWN },
     [A_VPFXD]    = { "vpfxd",    F_UNKNOWN },
+        [A_VIIM]     = { "viim",     F_UNKNOWN },
+    [A_VFIM]     = { "vfim",     F_UNKNOWN },
     [A_VFPU_UNKNOWN] = { "vfpu?", F_UNKNOWN },
 };
 
@@ -546,8 +548,15 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         case 0: case 1: op = A_VPFXS; break;
         case 2: case 3: op = A_VPFXT; break;
         case 4: case 5: op = A_VPFXD; break;
-        default: op = A_VFPU_UNKNOWN; break;   /* viim.s / vfim.s */
+        /* Immediate loads. Bit 23 picks the format: viim takes a signed 16-bit
+         * integer, vfim a half-precision float. Both write a single lane. */
+        case 6: op = A_VIIM; break;
+        case 7: op = A_VFIM; break;
+        default: op = A_VFPU_UNKNOWN; break;
         }
+        out->vd = (word >> 16) & 0x7F;
+        out->imm = (int32_t)(int16_t)(word & 0xFFFF);
+        out->vsize = 1;
         break;
     case 0x19:
         switch ((word >> 23) & 7) {

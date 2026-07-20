@@ -253,6 +253,58 @@ void psp_vmidt(uint32_t vd, int size) {
             psp_cpu.v[cols[c][r]] = (c == r) ? 1.0f : 0.0f;
 }
 
+/* vidt -- an identity *vector*: all zeroes but for a single 1.0.
+ *
+ * Which element gets the 1 is encoded in the destination register number
+ * rather than given as an operand, which is how one instruction builds any
+ * basis vector. Bits 6-7 of vd select the position.
+ *
+ * This is matrix-setup code. Trapping it to a no-op leaves whatever was in the
+ * register, so downstream geometry is built on a basis that is not a basis. */
+void psp_vidt(uint32_t vd, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vidt")) return;
+    int d[4];
+    int n = psp_vfpu_regs(vd, size, d);
+    const int one = (int)((vd >> 6) & 3);
+    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = (i == one) ? 1.0f : 0.0f;
+}
+
+/* vcst -- load a constant from the VFPU's built-in table.
+ *
+ * The index is in the vs field. Values follow the hardware table; index 0 is
+ * zero and anything past the end reads as zero rather than as garbage. */
+void psp_vcst(uint32_t vd, uint32_t which, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vcst")) return;
+
+    static const float K[20] = {
+        0.0f,
+        3.4028235e38f,          /* max float          */
+        1.41421356f,            /* sqrt(2)            */
+        0.70710678f,            /* sqrt(1/2)          */
+        1.12837917f,            /* 2/sqrt(pi)         */
+        0.63661977f,            /* 2/pi               */
+        0.31830989f,            /* 1/pi               */
+        0.78539816f,            /* pi/4               */
+        1.57079633f,            /* pi/2               */
+        3.14159265f,            /* pi                 */
+        2.71828183f,            /* e                  */
+        1.44269504f,            /* log2(e)            */
+        0.43429448f,            /* log10(e)           */
+        0.69314718f,            /* ln(2)              */
+        2.30258509f,            /* ln(10)             */
+        6.28318531f,            /* 2*pi               */
+        0.52359878f,            /* pi/6               */
+        0.30103000f,            /* log10(2)           */
+        3.32192809f,            /* log2(10)           */
+        0.86602540f,            /* sqrt(3)/2          */
+    };
+
+    const float k = which < 20 ? K[which] : 0.0f;
+    int d[4];
+    int n = psp_vfpu_regs(vd, size, d);
+    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = k;
+}
+
 void psp_vmzero(uint32_t vd, int size) {
     if (!take_prefixes(psp_cpu.pc, "vmzero")) return;
     int cols[4][4];
@@ -377,4 +429,12 @@ void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size) {
     if (any) cc |= 1u << 4;
     if (all) cc |= 1u << 5;
     psp_cpu.vfpu_cc = cc;
+}
+
+/* viim / vfim -- write a single lane from an immediate encoded in the
+ * instruction. No prefixes apply: there is no source operand to rewrite. */
+void psp_vimm(uint32_t vd, float value) {
+    int d[4];
+    psp_vfpu_regs(vd, 1, d);
+    psp_cpu.v[d[0]] = value;
 }
