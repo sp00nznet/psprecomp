@@ -4135,3 +4135,54 @@ its immediate mechanism is now known (no link in the executed chain restores),
 but whether it is a *cause* or another *symptom* of the remaining allocation
 failure is not yet established. Establishing that comes first -- fixing stack
 handling that is not broken would be the fourth wrong turn of its kind here.
+
+---
+
+# A discovery gap: backward `j` into another function's block
+
+`0x0000E588` was the one remaining dispatch miss, and the emitted code showed
+why:
+
+```c
+    /* 0000E604  j          0x0000E588 */
+    psp_dispatch(0x0000E588u);  /* not discovered */
+```
+
+A **direct** jump, target known at compile time, and discovery had never
+claimed it. The cause is a gap between two paths that should have matched:
+
+- A conditional **branch** whose target is already claimed by an earlier walk
+  promotes that target to an entry (`c->cross`), because the emitter cannot
+  express a branch into another C function''s middle.
+- A backward **jump** in the same situation did not. It was pushed as a local
+  block, the walk found it already `SEEN_CODE`, and it was silently dropped.
+
+The branch path had carried the comment explaining exactly this problem since
+it was written. The jump path, twenty lines below, needed the same three lines
+and never got them.
+
+Fixed by mirroring the branch logic. Effect on Lumberjack:
+
+```
+                        before        after
+function entries run    265           4,309,119,950
+calls dispatched        16            108
+GE lists                0             3
+"not discovered" sites  25            24
+```
+
+Execution now runs *through* the allocator instead of stalling inside it, and
+reaches the asset-record lookup at `0x00067E58` -- the stall this document
+described before the allocator work began. That is forward progress: the
+allocator is no longer the blocker, and the GE is being fed again.
+
+## What this says about the earlier allocator hunt
+
+Much of the preceding investigation chased consequences of this one gap. The
+allocator appeared to fail, to leak stack, to return null -- all of it
+downstream of a jump that dispatched to an address that was never registered.
+The `psp_arg` fix was independently real and necessary; the stack-imbalance
+readings were measurements of a program already off its intended path.
+
+Worth stating because the stack-balance checker is still reporting 247
+violations, and they should be re-read now rather than trusted from before.

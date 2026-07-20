@@ -245,8 +245,28 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                  * function is still correct code reached through the dispatch
                  * table, whereas a wrongly merged one has bogus boundaries. */
                 if (in.has_target && a_in_range(an, in.target)) {
+                    uint32_t bi = word_index(an, in.target);
                     if (in.target <= a && a != entry && !is_known_entry(c, in.target)) {
-                        u32_push(&blocks, in.target);          /* loop */
+                        /* Backward `j` -- a loop back-edge into this function's
+                         * own blocks, unless another walk already claimed the
+                         * target. Then the two functions share a block, exactly
+                         * as for a conditional branch, and for the same reason:
+                         * walk order, not a property of the code.
+                         *
+                         * The emitter cannot express a jump into another C
+                         * function's middle. It degrades to a dispatch, which
+                         * misses because the address was never made an entry --
+                         * observed as `j 0x0000E588` inside the allocator,
+                         * emitted as a dispatch to an undiscovered address
+                         * and missing at run time.
+                         *
+                         * The branch path above has always promoted these. The
+                         * jump path did not, so a whole class of shared block
+                         * stayed unreachable. */
+                        if ((c->seen[bi] & SEEN_CODE) && !c->entry_map[bi])
+                            u32_push(c->cross, in.target);
+                        else
+                            u32_push(&blocks, in.target);
                     } else {
                         uint32_t ti = word_index(an, in.target);
                         if (!c->entry_map[ti]) {
