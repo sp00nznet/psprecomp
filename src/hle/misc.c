@@ -96,8 +96,21 @@ static void hle_RegisterExitCallback(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
 /* A game-sharing microgame is self-contained and does not load further
  * modules, so these report a plausible identity rather than doing anything.
  * A title that genuinely loads PRXs at run time will need real ones. */
-static void hle_GetModuleId(void)          { psp_ret(1); }
-static void hle_GetModuleIdByAddress(void) { psp_ret(1); }
+/* These previously returned a fabricated module id of 1.
+ *
+ * A hypothesis was tested and FALSIFIED: that newlib's _getmodreent asks for
+ * the module owning an address, receives the fake id, fails to match it
+ * against the game's per-module table, and returns null. Returning an error
+ * instead produced byte-identical output -- same message, same ten dispatch
+ * misses -- so this call is not on that path at all.
+ *
+ * The error return is kept anyway. Fabricating an id we cannot honour is
+ * exactly the sort of plausible lie that turns into a silent failure later,
+ * and an error is the truthful answer while no module registry exists. */
+#define SCE_KERNEL_ERROR_UNKNOWN_MODULE 0x80020139u
+
+static void hle_GetModuleId(void)          { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_MODULE); }
+static void hle_GetModuleIdByAddress(void) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_MODULE); }
 static void hle_ModuleOk(void)             { psp_ret(SCE_KERNEL_ERROR_OK); }
 
 /* ---- sceCtrl ------------------------------------------------------------- */
