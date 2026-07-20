@@ -4097,3 +4097,41 @@ reachable without new machinery.
 That is the next change, and the call-site checker will confirm it: the four
 violations should go to zero, and the -48 that has been measured three ways
 should disappear with them.
+
+### Correction: the nested-call explanation is wrong
+
+The previous section claimed the fall-through emission loses the frame because
+it becomes a nested C call whose `return` unwinds to the caller. **That is
+wrong.** `r_sp` is a *global* in the generated code, not a C local -- a callee''s
+change to it persists after the C call returns. A tail-call chain therefore
+restores `$sp` correctly, however deeply nested, provided some link in the
+chain actually performs the restore.
+
+What is true, and checked:
+
+```
+psp_body_0000EA18  exists, 44 lines, contains no `r_sp = r_sp` at all
+```
+
+So the fall-through target does not restore `$sp`, and neither does
+`0x0000E4DC` on the path taken. The 32 bytes are simply never returned by any
+link that executes.
+
+That leaves two possibilities, and they are distinguishable:
+
+1. The chain diverges from the original somewhere -- a branch taken differently,
+   so the epilogue that would restore is never reached. A recompiler fault.
+2. The original genuinely does not restore on this path, because it is an error
+   path that never returns normally on hardware either -- for example one that
+   ends in a longjmp or an abort. Then the leak is a symptom of taking an error
+   path that should not have been taken, not of stack handling at all.
+
+The second deserves weight: this is the *allocation-failure* path, reached
+because something in the loop still fails to allocate. An error path that
+abandons its frame is ordinary in C runtime code.
+
+So the honest state is: the stack imbalance is real and measured three ways,
+its immediate mechanism is now known (no link in the executed chain restores),
+but whether it is a *cause* or another *symptom* of the remaining allocation
+failure is not yet established. Establishing that comes first -- fixing stack
+handling that is not broken would be the fourth wrong turn of its kind here.
