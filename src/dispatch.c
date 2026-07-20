@@ -66,6 +66,26 @@ void psp_register(uint32_t addr, psp_fn_t fn) {
     g_count++;
 }
 
+/* Register an interior label -- a block in the middle of a function that some
+ * computed jump can land on. Unlike psp_register this never overwrites: a real
+ * function entry runs the whole function, a label thunk enters partway through,
+ * and if an address is both then the entry is the correct answer. */
+void psp_register_label(uint32_t addr, psp_fn_t fn) {
+    if (!g_table || (g_count + 1) * 4 >= g_cap * 3) grow();
+    if (!g_table) return;
+
+    uint32_t m = g_cap - 1;
+    uint32_t j = hash_addr(addr) & m;
+    while (g_table[j].used) {
+        if (g_table[j].addr == addr) return;      /* already known: keep it */
+        j = (j + 1) & m;
+    }
+    g_table[j].addr = addr;
+    g_table[j].fn = fn;
+    g_table[j].used = 1;
+    g_count++;
+}
+
 psp_fn_t psp_lookup(uint32_t addr) {
     if (!g_table) return NULL;
     uint32_t m = g_cap - 1;

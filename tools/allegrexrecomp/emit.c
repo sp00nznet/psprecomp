@@ -23,7 +23,20 @@ typedef struct {
     const a_func *func;
     uint8_t *is_label;     /* per word, within the current function */
     uint8_t *is_slot;      /* per word: consumed as a delay slot */
+    uint32_t *entries;     /* interior labels that got a dispatch thunk */
+    int nentries, centries;
 } ectx;
+
+static void entry_push(ectx *c, uint32_t a) {
+    if (c->nentries == c->centries) {
+        int n = c->centries ? c->centries * 2 : 1024;
+        uint32_t *p = (uint32_t *)realloc(c->entries, (size_t)n * sizeof *p);
+        if (!p) return;                  /* out of memory: lose the thunk, not the run */
+        c->entries = p;
+        c->centries = n;
+    }
+    c->entries[c->nentries++] = a;
+}
 
 /* ---- helpers ------------------------------------------------------------- */
 
@@ -512,9 +525,6 @@ static void emit_function(ectx *c, const a_func *fn) {
     if (fn->has_indirect)
         fprintf(f, " * Contains a computed jump routed through the dispatch table.\n");
     fprintf(f, " * ------------------------------------------------------------- */\n");
-    fprintf(f, "void psp_func_%08X(void) {\n", fn->addr);
-    /* Compiles away unless the generated code is built with PSPRECOMP_TRACE. */
-    fprintf(f, "    PSP_ENTER(0x%08Xu);\n", fn->addr);
 
     /* A function's instructions do not always begin at its entry: a backward
      * jump can pull in a block that lies *below* the entry address, and
@@ -525,9 +535,40 @@ static void emit_function(ectx *c, const a_func *fn) {
      * Without this, calling the function silently runs whatever happens to sit
      * lowest in its address range -- with none of the entry's setup having
      * run. Registers hold stale values and the damage surfaces far away. */
-    if (fn->start != fn->addr) {
-        c->is_label[widx(an, fn->addr)] = 1;
-        fprintf(f, "    goto L_%08X;\n", fn->addr);
+    c->is_label[widx(an, fn->addr)] = 1;
+
+    /* The body takes the address to start at, and every label is reachable
+     * through it.
+     *
+     * A recompiled function has exactly one C entry point, but the original
+     * has as many as something can jump to. Direct branches within a function
+     * are just `goto`, and cross-function branches are promoted to entries by
+     * discovery -- but a *computed* jump (jump table, function pointer, a
+     * return address handed around) resolves at runtime, and its target is
+     * routinely a block in the middle of a function that discovery had no
+     * static reason to make callable. Dispatch then misses on an address whose
+     * code is right there in the file, sitting under a label nothing can reach.
+     *
+     * Rather than keep discovering these one crash at a time, every label gets
+     * a thunk and a dispatch entry. The switch costs one jump on entry and
+     * makes the whole class -- jump tables, indirect calls, cross-function
+     * branches -- resolve by construction. */
+    fprintf(f, "static void psp_body_%08X(uint32_t _entry) {\n", fn->addr);
+    fprintf(f, "    PSP_ENTER(0x%08Xu);\n", fn->addr);
+
+    int nlabels = 0;
+    for (uint32_t a = fn->start; a < fn->end; a += 4)
+        if (owned_by(an, a, owner) && c->is_label[widx(an, a)]) nlabels++;
+
+    if (nlabels > 1 || fn->start != fn->addr) {
+        fprintf(f, "    switch (_entry) {\n");
+        for (uint32_t a = fn->start; a < fn->end; a += 4) {
+            if (!owned_by(an, a, owner) || !c->is_label[widx(an, a)]) continue;
+            if (c->is_slot[widx(an, a)]) continue;   /* only the inline copy is real */
+            fprintf(f, "    case 0x%08Xu: goto L_%08X;\n", a, a);
+        }
+        fprintf(f, "    default: break;\n");
+        fprintf(f, "    }\n");
     }
 
     int last_terminal = 0;
@@ -662,6 +703,18 @@ static void emit_function(ectx *c, const a_func *fn) {
         }
     }
     fprintf(f, "}\n");
+
+    /* The real entry, plus one thunk per interior label so anything that can be
+     * jumped to can also be dispatched to. */
+    fprintf(f, "void psp_func_%08X(void) { psp_body_%08X(0x%08Xu); }\n",
+            fn->addr, fn->addr, fn->addr);
+    for (uint32_t a = fn->start; a < fn->end; a += 4) {
+        if (!owned_by(an, a, owner) || !c->is_label[widx(an, a)]) continue;
+        if (c->is_slot[widx(an, a)] || a == fn->addr) continue;
+        fprintf(f, "void psp_at_%08X(void) { psp_body_%08X(0x%08Xu); }\n",
+                a, fn->addr, a);
+        entry_push(c, a);
+    }
 }
 
 /* ---- files --------------------------------------------------------------- */
@@ -803,6 +856,8 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
     c.an = an;
     c.is_label = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
     c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
+    c.entries = NULL;
+    c.nentries = c.centries = 0;
     if (!c.is_label || !c.is_slot) {
         free(c.is_label); free(c.is_slot); fclose(f);
         return -1;
@@ -823,13 +878,19 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
     for (int i = 0; i < an->nfuncs; i++)
         fprintf(f, "    psp_register(0x%08Xu, psp_func_%08X);\n",
                 an->funcs[i].addr, an->funcs[i].addr);
+    /* Interior labels last, so a real function entry always wins a collision. */
+    for (int i = 0; i < c.nentries; i++)
+        fprintf(f, "    psp_register_label(0x%08Xu, psp_at_%08X);\n",
+                c.entries[i], c.entries[i]);
     fprintf(f, "}\n");
 
     free(c.is_label);
     free(c.is_slot);
+    free(c.entries);
     fclose(f);
 
-    printf("wrote %s/%s_funcs.c   (%d functions)\n", o->outdir, o->prefix, an->nfuncs);
+    printf("wrote %s/%s_funcs.c   (%d functions, %d interior entries)\n",
+           o->outdir, o->prefix, an->nfuncs, c.nentries);
     printf("wrote %s/%s_funcs.h\n", o->outdir, o->prefix);
     printf("wrote %s/%s_imports.c (%d imports)\n", o->outdir, o->prefix, an->nimports);
     return 0;

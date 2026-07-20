@@ -74,9 +74,12 @@ typedef struct {
 static ge_queue g_queue[MAX_QUEUES];
 static uint32_t g_next_id;
 
+static uint64_t g_pixels;          /* pixels written, the proof of life */
+static uint64_t g_unsupported;     /* vertices in a format we do not read */
+
 /* Tracked state, and the counters that make the report worth reading. */
 static struct {
-    uint32_t fbp, fbw, vtype;
+    uint32_t fbp, fbw, vtype, vaddr;
     uint64_t commands;
     uint64_t prims[8];
     uint64_t vertices;
@@ -88,6 +91,8 @@ static struct {
 void psp_ge_reset(void) {
     memset(g_queue, 0, sizeof g_queue);
     memset(&g_ge, 0, sizeof g_ge);
+    g_pixels = 0;
+    g_unsupported = 0;
     g_next_id = 0x00080000u;
 }
 
@@ -107,10 +112,184 @@ void psp_ge_dump_stats(FILE *out) {
     if (g_ge.unknown)
         fprintf(out, "    %llu commands not individually decoded\n",
                 (unsigned long long)g_ge.unknown);
+    fprintf(out, "    pixels written: %llu\n", (unsigned long long)g_pixels);
+    if (g_unsupported)
+        fprintf(out, "    %llu vertices in an unsupported format (transformed, or no position)\n",
+                (unsigned long long)g_unsupported);
 }
 
 uint64_t psp_ge_command_count(void) { return g_ge.commands; }
 uint64_t psp_ge_vertex_count(void)  { return g_ge.vertices; }
+
+/* ---- rasterizer ----------------------------------------------------------
+ *
+ * Enough of the GE to put pixels in the framebuffer. Deliberately narrow:
+ *
+ *  - "through" mode only (VTYPE bit 23), where vertex coordinates are already
+ *    in screen space. That is what 2D games and every UI layer use. Transformed
+ *    geometry needs the matrix pipeline and is not attempted here -- drawing it
+ *    with the wrong transform would look like a rendering bug rather than a
+ *    missing feature.
+ *  - Position as 16-bit or float; colour as 8888 or none.
+ *  - Flat/interpolated colour, no texturing, no depth, no blending.
+ *
+ * The point is to close the loop from display list to visible pixels so the
+ * rest can be measured against something. Everything omitted is omitted
+ * loudly: unsupported vertex formats are counted, not guessed at.
+ */
+
+/* VTYPE field extraction. */
+#define VT_TEX(v)     ((v) & 3)
+#define VT_COLOR(v)   (((v) >> 2) & 7)
+#define VT_NORMAL(v)  (((v) >> 5) & 3)
+#define VT_POS(v)     (((v) >> 7) & 3)
+#define VT_WEIGHT(v)  (((v) >> 9) & 3)
+#define VT_INDEX(v)   (((v) >> 11) & 3)
+#define VT_THROUGH(v) (((v) >> 23) & 1)
+
+typedef struct { int x, y; uint32_t rgba; } ge_vertex;
+
+uint64_t psp_ge_pixels(void) { return g_pixels; }
+
+/* Size of one vertex in bytes, and the offsets within it. Components appear in
+ * a fixed order (weights, texture, colour, normal, position) and each is
+ * aligned to its own size, which is what makes the stride awkward enough to be
+ * worth computing rather than assuming. */
+static int vertex_layout(uint32_t vtype, int *col_off, int *pos_off) {
+    static const int tex_sz[4]   = { 0, 1, 2, 4 };
+    static const int col_sz[8]   = { 0, 0, 0, 0, 2, 2, 2, 4 };
+    static const int norm_sz[4]  = { 0, 1, 2, 4 };
+    static const int pos_sz[4]   = { 0, 1, 2, 4 };
+
+    int off = 0, align = 1;
+    int t = tex_sz[VT_TEX(vtype)] * 2;
+    int c = col_sz[VT_COLOR(vtype)];
+    int n = norm_sz[VT_NORMAL(vtype)] * 3;
+    int p = pos_sz[VT_POS(vtype)] * 3;
+
+    if (VT_WEIGHT(vtype)) return 0;          /* skinning: not handled */
+
+    int ts = tex_sz[VT_TEX(vtype)];
+    if (ts) { off = (off + ts - 1) & ~(ts - 1); off += t; if (ts > align) align = ts; }
+    int cs = col_sz[VT_COLOR(vtype)];
+    if (cs) { off = (off + cs - 1) & ~(cs - 1); *col_off = off; off += c; if (cs > align) align = cs; }
+    else *col_off = -1;
+    int ns = norm_sz[VT_NORMAL(vtype)];
+    if (ns) { off = (off + ns - 1) & ~(ns - 1); off += n; if (ns > align) align = ns; }
+    int ps = pos_sz[VT_POS(vtype)];
+    if (!ps) return 0;                        /* no position: nothing to draw */
+    off = (off + ps - 1) & ~(ps - 1); *pos_off = off; off += p;
+    if (ps > align) align = ps;
+
+    return (off + align - 1) & ~(align - 1);  /* stride */
+}
+
+static int read_vertex(uint32_t addr, uint32_t vtype, int col_off, int pos_off,
+                       ge_vertex *out) {
+    out->rgba = 0xFFFFFFFFu;
+    if (col_off >= 0 && VT_COLOR(vtype) == 7)
+        out->rgba = psp_read32(addr + (uint32_t)col_off);
+
+    switch (VT_POS(vtype)) {
+    case 2:   /* 16-bit */
+        out->x = (int16_t)psp_read16(addr + (uint32_t)pos_off);
+        out->y = (int16_t)psp_read16(addr + (uint32_t)pos_off + 2);
+        return 1;
+    case 3: { /* float */
+        out->x = (int)psp_read_f32(addr + (uint32_t)pos_off);
+        out->y = (int)psp_read_f32(addr + (uint32_t)pos_off + 4);
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
+static void put_pixel(int x, int y, uint32_t rgba) {
+    if (!g_ge.fbp || !g_ge.fbw) return;
+    if (x < 0 || y < 0 || x >= 480 || y >= 272) return;
+    psp_write32(g_ge.fbp + (uint32_t)(y * (int)g_ge.fbw + x) * 4, rgba);
+    g_pixels++;
+}
+
+/* Barycentric triangle fill. Integer edge functions, so a shared edge belongs
+ * to exactly one triangle and adjacent geometry neither double-draws nor
+ * leaves seams. */
+static void raster_tri(const ge_vertex *a, const ge_vertex *b, const ge_vertex *c) {
+    int minx = a->x < b->x ? (a->x < c->x ? a->x : c->x) : (b->x < c->x ? b->x : c->x);
+    int maxx = a->x > b->x ? (a->x > c->x ? a->x : c->x) : (b->x > c->x ? b->x : c->x);
+    int miny = a->y < b->y ? (a->y < c->y ? a->y : c->y) : (b->y < c->y ? b->y : c->y);
+    int maxy = a->y > b->y ? (a->y > c->y ? a->y : c->y) : (b->y > c->y ? b->y : c->y);
+
+    if (minx < 0) minx = 0;
+    if (miny < 0) miny = 0;
+    if (maxx > 479) maxx = 479;
+    if (maxy > 271) maxy = 271;
+
+    const int area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
+    if (area == 0) return;
+
+    for (int y = miny; y <= maxy; y++) {
+        for (int x = minx; x <= maxx; x++) {
+            int w0 = (b->x - a->x) * (y - a->y) - (b->y - a->y) * (x - a->x);
+            int w1 = (c->x - b->x) * (y - b->y) - (c->y - b->y) * (x - b->x);
+            int w2 = (a->x - c->x) * (y - c->y) - (a->y - c->y) * (x - c->x);
+            /* Accept either winding, so back-face orientation does not silently
+             * drop half the geometry while culling is unimplemented. */
+            int inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) ||
+                         (w0 <= 0 && w1 <= 0 && w2 <= 0);
+            if (inside) put_pixel(x, y, a->rgba);
+        }
+    }
+}
+
+/* A sprite is two vertices giving opposite corners of an axis-aligned rect --
+ * the PSP's 2D primitive, and how most UI is drawn. */
+static void raster_sprite(const ge_vertex *a, const ge_vertex *b) {
+    int x0 = a->x < b->x ? a->x : b->x, x1 = a->x > b->x ? a->x : b->x;
+    int y0 = a->y < b->y ? a->y : b->y, y1 = a->y > b->y ? a->y : b->y;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) put_pixel(x, y, b->rgba);
+}
+
+static void draw_prim(uint32_t type, uint32_t count) {
+    if (!VT_THROUGH(g_ge.vtype)) { g_unsupported += count; return; }
+    if (!g_ge.vaddr) { g_unsupported += count; return; }
+
+    int col_off = -1, pos_off = 0;
+    int stride = vertex_layout(g_ge.vtype, &col_off, &pos_off);
+    if (!stride) { g_unsupported += count; return; }
+
+    ge_vertex v[3];
+    switch (type) {
+    case 6:   /* sprites: consecutive pairs */
+        for (uint32_t i = 0; i + 1 < count; i += 2) {
+            if (!read_vertex(g_ge.vaddr + i * (uint32_t)stride, g_ge.vtype, col_off, pos_off, &v[0])) break;
+            if (!read_vertex(g_ge.vaddr + (i + 1) * (uint32_t)stride, g_ge.vtype, col_off, pos_off, &v[1])) break;
+            raster_sprite(&v[0], &v[1]);
+        }
+        break;
+    case 3:   /* triangles */
+        for (uint32_t i = 0; i + 2 < count; i += 3) {
+            for (int k = 0; k < 3; k++)
+                if (!read_vertex(g_ge.vaddr + (i + (uint32_t)k) * (uint32_t)stride,
+                                 g_ge.vtype, col_off, pos_off, &v[k])) return;
+            raster_tri(&v[0], &v[1], &v[2]);
+        }
+        break;
+    case 4:   /* triangle strip */
+        for (uint32_t i = 0; i + 2 < count; i++) {
+            for (int k = 0; k < 3; k++)
+                if (!read_vertex(g_ge.vaddr + (i + (uint32_t)k) * (uint32_t)stride,
+                                 g_ge.vtype, col_off, pos_off, &v[k])) return;
+            raster_tri(&v[0], &v[1], &v[2]);
+        }
+        break;
+    default:
+        g_unsupported += count;
+        break;
+    }
+}
 
 /* Walk a list until END/FINISH, the stall address, or a step budget.
  *
@@ -142,6 +321,7 @@ static void run_list(ge_queue *q) {
             uint32_t count = arg & 0xFFFF;
             g_ge.prims[type]++;
             g_ge.vertices += count;
+            draw_prim(type, count);
             break;
         }
         case GE_BEZIER:
@@ -190,8 +370,8 @@ static void run_list(ge_queue *q) {
             g_ge.fbp = (g_ge.fbp & 0x00FFFFFFu) | ((arg & 0xFF0000) << 8);
             break;
 
-        case GE_VADDR: case GE_IADDR:
-            break;
+        case GE_VADDR: g_ge.vaddr = (q->base | (arg & 0xFFFFFF)); break;
+        case GE_IADDR: break;
 
         default:
             /* A real state command we do not decode individually. Counted, not

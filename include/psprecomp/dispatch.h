@@ -25,6 +25,7 @@ typedef void (*psp_fn_t)(void);
 /* Register one recompiled function. The generated code calls this for every
  * function it defines, from a single init routine. */
 void psp_register(uint32_t addr, psp_fn_t fn);
+void psp_register_label(uint32_t addr, psp_fn_t fn);
 
 /* Look up a target. Returns NULL if nothing is registered there. */
 psp_fn_t psp_lookup(uint32_t addr);
