@@ -768,3 +768,39 @@ address or predicate is wrong -- rather than at anything architectural.
    for stores that should land in `$a0`.
 2. If the stores are emitted correctly, watch `$a0` across the call: the object
    pointer may be wrong on entry, in which case the fault is in its caller.
+
+## 0x000681C8 is not the constructor
+
+```
+000681C8  addiu $v1, $zero, -1
+000681CC  sw    $v1, 31976($a0)      ; a0 + 0x7CE8
+000681D0  addu  $a1, $zero, $zero
+000681D4  addiu $a1, $a1, 1
+000681D8  sw    $zero, 31964($a0)    ; a0 + 0x7CDC
+000681DC  sltiu $v1, $a1, 3
+000681E0  bne   $v1, $zero, 0x000681D4
+000681E4  addiu $a0, $a0, 4
+```
+
+It writes `-1` and `0` at `$a0 + ~32000` -- three times, striding by 4. Those
+are not vtable pointers and they are nowhere near `$s1 + 12`. So this function
+was never going to fill the object, and the previous section's framing ("the
+constructor ran and wrote nothing") was wrong: it ran and wrote exactly what it
+was supposed to, somewhere else entirely.
+
+`psp_func_000681D4` in the entry trace is this function's *inner loop*, not
+evidence that an initialiser for the vtable object executed.
+
+The remaining candidate before the loop is `0x00067844`, called with
+`a0 = s1, a1 = 0`. That is the next thing to read -- and this time read it
+before drawing a conclusion from the trace.
+
+## Standing summary
+
+- Stall cause: seventeen objects with null vtable pointers, at one call site
+  (`0x00066C78`), cascading into uninitialised hash tables whose walks
+  self-loop.
+- The objects live in `.bss`; zero is their correct initial state, so this is
+  **not** a relocation or loader fault.
+- Whatever fills them either has not been found yet or is not running.
+- `0x00067844` is the only remaining candidate on the path.
