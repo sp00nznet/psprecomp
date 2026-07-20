@@ -3880,3 +3880,49 @@ instead of waiting for it to be violated somewhere observable.
    stack decrement.
 2. Start at `0x0000D410` (-16), the innermost leak, and find the path through
    it that skips its epilogue.
+
+## The checker needs filtering, and the "leaks" are mostly legitimate
+
+Reporting the exact return site rather than the function shows what the flagged
+exits actually are:
+
+```
+0x0000D60C: -16   ->  j 0x0000D520      -- a tail jump, not a return
+0x0000E204: -48   ->  jr $ra in an epilogue whose callee was still mid-frame
+0x0004D824: +16   ->  a split continuation holding an epilogue, no prologue
+```
+
+`0x0000D60C` is `j 0x0000D520`. The emitter renders an out-of-function jump as
+`psp_func_X(); return;`, and at that synthesized `return` the frame is
+*correctly* still open -- the target runs the epilogue. Checking there reports
+every tail jump as a leak.
+
+So the invariant "`$sp` at entry equals `$sp` at return" holds only for a
+genuine `jr $ra` in a body that also contains its own prologue. Neither
+condition is true for split continuations or tail jumps, and this module has
+many of both.
+
+An attempt to restrict the check to `in.is_return` did not change the counts,
+so the restriction is not yet effective -- the emitted check count stayed at
+3,866. The filter needs to be written deliberately rather than by pattern
+substitution, which is how the last several edits in this session went wrong.
+
+## What the checker is worth anyway
+
+It reduced "somewhere a stack frame shifts" to eleven specific return sites in
+one run, and reading three of them settled what they are. That is the right
+kind of tool even unfiltered: it produces candidates with addresses instead of
+symptoms without them.
+
+**But the -48 measured between the two allocator calls is still unexplained.**
+That was two register reads at two addresses -- no window, no synthesized
+return, no split body -- and it remains the one solid piece of evidence that a
+frame really does shift. The checker has not yet found the site responsible.
+
+### Next
+
+1. Write the filter properly: emit `PSP_SP_CHECK` only where `in.is_return` is
+   true **and** the enclosing body begins with a stack decrement.
+2. Re-run. If the -48 site appears, it is the bug; if nothing appears, the
+   shift happens somewhere the check cannot see -- most likely across a tail
+   jump between split bodies, where no single body owns both halves of a frame.

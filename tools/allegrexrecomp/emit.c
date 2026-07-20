@@ -705,7 +705,13 @@ static void emit_function(ectx *c, const a_func *fn) {
 
         if (in.is_return) {                      /* jr $ra */
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", fn->addr);
+            /* Only a genuine `jr $ra` is expected to leave $sp as it found it.
+             * Tail jumps and cross-function transfers are emitted as `return`
+             * too, but their epilogue runs in the target, so $sp is correctly
+             * still mid-frame there -- checking those reports every tail call
+             * as a leak. */
+            fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n", a);
+            fprintf(f, "    return;\n");
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
             continue;
@@ -725,7 +731,7 @@ static void emit_function(ectx *c, const a_func *fn) {
                 fprintf(f, "    goto L_%08X;\n", in.target);
             } else {
                 emit_static_call(c, in.target);  /* tail call */
-                fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", fn->addr);
+                fprintf(f, "    return;\n");
             }
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
