@@ -3,6 +3,7 @@
 #include "analyze.h"
 #include "decode.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -69,6 +70,9 @@ typedef struct {
     u32list    *func_queue;
     u32list    *imports;
     u32list    *indirects;
+    /* Branch targets already claimed by an earlier walk; promoted to entries
+     * between rounds so they become reachable through dispatch. */
+    u32list    *cross;
 } walk_ctx;
 
 static int is_known_entry(const walk_ctx *c, uint32_t addr) {
@@ -199,8 +203,24 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
             if (in.is_branch) {
                 /* Conditional: the target is another block of this function,
                  * and execution also falls through past the delay slot. */
-                if (in.has_target && a_in_range(an, in.target))
-                    u32_push(&blocks, in.target);
+                if (in.has_target && a_in_range(an, in.target)) {
+                    uint32_t ti = word_index(an, in.target);
+                    if ((c->seen[ti] & SEEN_CODE) && !c->entry_map[ti]) {
+                        /* Already claimed by an earlier walk, and not an entry.
+                         * Two functions therefore share this block, which is a
+                         * walk-order artefact rather than a property of the
+                         * code -- whichever was traced first took it.
+                         *
+                         * The emitter cannot express a branch into another C
+                         * function's middle; it degrades to a dispatch, which
+                         * then misses because the address is not an entry.
+                         * Promoting it to one makes it reachable. Over-split
+                         * is the safe direction; unreachable is not. */
+                        u32_push(c->cross, in.target);
+                    } else {
+                        u32_push(&blocks, in.target);
+                    }
+                }
                 a += 8;
                 continue;
             }
@@ -437,9 +457,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     if (!owner) { free(seen); free(entry_map); return -1; }
     for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
 
-    u32list queue = { 0 }, imports = { 0 }, indirects = { 0 };
+    u32list queue = { 0 }, imports = { 0 }, indirects = { 0 }, cross = { 0 };
     walk_ctx ctx = { an, seen, entry_map, owner, A_NO_OWNER,
-                     &queue, &imports, &indirects };
+                     &queue, &imports, &indirects, &cross };
 
     /* Pass 1: establish the complete set of function entries before walking
      * anything. Both the tail-call test and the ran-off-the-end test need to
@@ -484,23 +504,57 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
      * not chased further -- one level covers the switch statements a compiler
      * actually emits, and unbounded rounds would need a fixpoint check for
      * very little gain. */
-    for (int round = 0; round < 2; round++) {
-    if (round == 1) {
-        if (!an->image || !indirects.n) break;
+    /* Iterate to a fixpoint. Each re-walk can expose cross-function branches that
+ * the previous walk order hid, so a fixed two rounds leaves some unpromoted --
+ * which shows up as a dispatch miss at run time. The cap is a termination
+ * guarantee, not an expected limit: entries only ever accumulate, so this
+ * converges in a handful of rounds. */
+    for (int round = 0; round < 8; round++) {
+    if (round > 0) {
+        if (!an->image && !cross.n && !indirects.n) break;
         u32list targets = { 0 };
         for (int i = 0; i < indirects.n; i++) {
             int n = resolve_jump_table(an, indirects.v[i], &targets);
             if (n > 0) { an->ntables++; an->ntable_targets += n; }
         }
+        for (int i = 0; i < cross.n; i++) u32_push(&targets, cross.v[i]);
+        cross.n = 0;
+        indirects.n = 0;
+        int added = 0;
         for (int i = 0; i < targets.n; i++) {
             uint32_t t = targets.v[i];
             if (!a_in_range(an, t)) continue;
             uint32_t ti = word_index(an, t);
             if (entry_map[ti]) continue;
             entry_map[ti] = 1;
-            u32_push(&queue, t);
+            added++;
         }
         free(targets.v);
+        if (!added) break;
+
+        /* Re-walk everything from a clean slate rather than walking only the
+         * new entries.
+         *
+         * A promoted address was, by definition, already claimed in round one
+         * -- that is why it showed up as a cross-function target. Walking it
+         * again in isolation does nothing: the very first instruction is
+         * already marked as code, so the trace stops immediately and produces
+         * an empty function. The owning function also still contains the code,
+         * so simply stealing it would leave that function with a hole.
+         *
+         * Discarding the round-one result and re-walking with the complete
+         * entry set produces correct, non-overlapping boundaries in one pass,
+         * because every split point is now known before any walking starts --
+         * which is the same reason the entry map is built up front to begin
+         * with. One extra walk is cheap; reconciling overlapping ownership
+         * afterwards is not. */
+        memset(seen, 0, nwords);
+        for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
+        an->insns = an->vfpu = an->invalid = 0;
+        nfuncs = 0;
+
+        for (uint32_t i = 0; i < nwords; i++)
+            if (entry_map[i]) u32_push(&queue, an->base + i * 4);
         if (!queue.n) break;
     }
 
@@ -545,6 +599,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     an->owner = owner;
     an->nwords = nwords;
 
+    free(cross.v);
     free(queue.v);
     free(seen);
     free(entry_map);
