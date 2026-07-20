@@ -2829,3 +2829,27 @@ vptrs at 0x00415B68+12.. never written
 ```
 
 Every link is a measurement, not an inference. The open end is the first line.
+
+## The 240 "undecoded" GE commands are an init sequence, not drawing
+
+Naming them instead of counting them:
+
+```
+GE cmd 0x15 arg 0x000000
+GE cmd 0x16 arg 0x000000
+...
+GE cmd 0x2B arg 0x000000
+```
+
+A contiguous run of state opcodes, **every argument zero**. That is
+`sceGuInit`''s state reset -- the library clearing the whole GE register file at
+start-up. Not draw setup, not geometry.
+
+So the three display lists the game submits contain no drawing at all, and
+`vtype` staying zero is correct rather than a symptom. **There is no hidden
+geometry the rasterizer is failing to draw.**
+
+That closes a question worth closing: rendering is not blocked by anything in
+the GE path. The rasterizer is tested and idle because the game has not asked
+it to draw, and it will not until start-up completes. No shortcut to pixels
+exists that bypasses the hang.

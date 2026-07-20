@@ -374,8 +374,13 @@ static void run_list(ge_queue *q) {
         case GE_IADDR: break;
 
         default:
-            /* A real state command we do not decode individually. Counted, not
-             * guessed at. */
+            /* A real state command we do not decode individually. Counted --
+             * and, for the first few, named. "240 commands not individually
+             * decoded" hides whether the game is configuring a draw or just
+             * poking state, which is the difference between a rendering bug
+             * and a game that has not asked to render yet. */
+            if (g_ge.unknown < 64)
+                fprintf(stderr, "  GE cmd 0x%02X arg 0x%06X\n", cmd, arg);
             g_ge.unknown++;
             break;
         }
