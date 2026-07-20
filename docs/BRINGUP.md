@@ -1760,3 +1760,66 @@ The hang is unchanged: `0x0004DD14`, ten billion iterations, `pixels written: 0`
 The allocator still receives `0x09FFFC20` as its reent. So the reent lookup now
 succeeds while the allocation still fails -- which means the reent it finds is
 not one with a usable arena, and the next question is what populates *that*.
+
+---
+
+# Retraction: the allocator was never shown to fail
+
+The reent is **valid and populated**:
+
+```
+allocator entry 0x0000E0AC: reent=0x09FFFC20
+  9 of first 64 words non-zero
+    +00 = 0x00000000      _errno
+    +04 = 0x09FFFE88      _stdin
+    +08 = 0x09FFFEE4      _stdout
+    +12 = 0x09FFFF40      _stderr
+```
+
+That is newlib''s `_reent` layout exactly. So "a stack address cannot be a valid
+reent" was wrong -- the reent legitimately lives high in RAM, and it is
+initialised.
+
+Worse, the measurement the whole allocator theory rested on was an artifact:
+
+```
+psp_body_0007443C: does not exist
+```
+
+`0x0007443C` is a **branch target inside a function**, not an entry, so the
+watch could never fire on it. Its "never ran" result meant nothing, and
+"the 32-byte allocation returns null" was never measured at all. The blind spot
+recorded two sections earlier is exactly the one that produced it.
+
+Auditing every address this investigation drew a conclusion from:
+
+```
+0x0007443C  NOT an entry   -> conclusion retracted
+0x00067E34  entry          -> stands
+0x00067E08  entry          -> stands
+0x00066DB4  entry          -> stands
+0x0005057C  entry          -> stands
+0x000743F0  entry          -> stands
+0x0007EAE8  entry          -> stands
+```
+
+## What survives, and it is less than the last few sections claimed
+
+Measured on real entries:
+
+- The seventeen sub-object constructors and five ancestor levels **never run**.
+- Seventeen null vtable dispatches at `0x00066C78`.
+- The chain walk at `0x0004DD14` self-loops -- 10,270,856,424 iterations.
+- `sceKernelAllocPartitionMemory` is never called.
+- The reent is valid; the module id is now reported and bad accesses are 0.
+
+**Retracted:** that allocation fails, that `$k0` explains it, that a guard
+before `sbrk` is responsible. The reent being sound removes the motive for all
+three.
+
+## Next
+
+Establish, on a real entry, whether allocation actually succeeds -- watch
+`0x0000E06C` (an entry) and record `$v0` when it returns, rather than inferring
+from a branch target. Then re-ask why the constructors do not run, without
+assuming memory is the reason.
