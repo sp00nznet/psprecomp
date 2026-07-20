@@ -1381,3 +1381,58 @@ here and a working allocator.
    establish one.
 3. Do not assume the reent layout. Read the offsets `0x0000E0AC` actually
    touches, the way `$t2 = 1` should have been read rather than assumed.
+
+## 0x0000E0AC is a real bucketed allocator
+
+```
+0000E0AC  addiu $sp, $sp, -32
+0000E0B0  sltiu $v0, $a1, 17        ; size < 17 -> small-block path
+0000E0BC  addu  $s4, $a0, $zero     ; s4 = reent
+0000E0C4  addu  $s0, $a1, $zero     ; s0 = size
+0000E0D4  bne   $v0, $zero, 0x0000E238
+```
+
+Not a thin wrapper around a kernel call -- it is a size-bucketed allocator that
+manages its own free lists, with the request (32 bytes) taking the large-block
+path. So the heap state it reads out of the `reent` is substantial, and an
+empty structure genuinely has nothing for it to return. That is consistent with
+the observed null and rules out "the reent just needs a valid pointer".
+
+This is where the session stops. The remaining work is to read which offsets
+`0x0000E0AC` consults on `$s4`, find the routine that populates them at
+start-up, and determine why it has not run -- noting that it may itself be
+downstream of `$k0`, since a start-up heap initialiser would plausibly reach
+its reent the same way.
+
+## Session summary
+
+Established, with measurements:
+
+- Allocation of 32 bytes at `0x000743F8` returns **null**; the success path
+  `0x0007443C` never executes.
+- The seventeen sub-object constructors, and five levels of their ancestors,
+  **never run**.
+- Their vptr words stay zero, so `0x00066C6C` dispatches through null 17 times.
+- Hash tables owned by those subsystems stay zeroed, so the walk at
+  `0x0004DD14` self-loops -- 10,020,314,003 iterations.
+- `$k0`, the thread pointer, is never set, which is why `_getmodreent` takes a
+  fallback. Setting it is necessary but not sufficient.
+
+Fixed this session:
+
+- `$ra` was never assigned by `jal`/`jalr` -- 2 assignments across 137,748
+  instructions became 9,814. Real codegen bug affecting every call.
+- Bad memory accesses 28 -> 3, by mapping the game''s own heap.
+- Every label is dispatchable (13,682 entries), ending the class of bug where a
+  computed jump lands on emitted-but-unreachable code.
+- The GE rasterizes: triangles, strips, sprites, six tests.
+- `vidt`, `vcst`, `viim`, `vfim`; `viim`/`vfim` also needed a decoder fix.
+
+Tools added because counters kept hiding diagnoses: a wall-clock watchdog, loop
+back-edge tracing, `psp_trace_watch`, bad-access address logging, dispatch-miss
+caller logging, successful-indirect-call logging.
+
+Falsified with evidence, so they are not retried: VFPU garbage, lost structure
+writes, PRX relocations (twice, from two directions), a clobbered `$s0`,
+broken construction, "a consumer running too early", and a garbage argument to
+`0x000743F0` that turned out to be a stale register at a split continuation.
