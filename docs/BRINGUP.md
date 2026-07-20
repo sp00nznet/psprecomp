@@ -2587,3 +2587,23 @@ Every theory falsified before the `$ra` fix was tested against a program whose
 calls did not return correctly. One has already been overturned by re-running
 it. The rest are marked in this document and should be re-run before being
 relied on.
+
+## The "no callers" discriminator does not work
+
+Recorded here because it was asserted in this document and in `src/ctors.c`
+before being tested. Enumerating every null-terminated run of code pointers
+whose entries are never called by name in the generated C:
+
+```
+candidate constructor tables (all entries uncalled): 1327
+```
+
+Useless. **Vtable entries have no callers either** -- they are reached through
+a vptr, never by name -- so the property does not separate the two at all. The
+claim was plausible, written down twice, and wrong; one scan settled it.
+
+What actually separated the real table was **locality**: all eight of its
+targets lie in `0x3B2AF8..0x3B2FCC`, a region above `.text` holding little
+else, because the compiler emits constructors together. Exactly one
+null-terminated array in the image points there. That is the property worth
+implementing, and the code comment now says so.

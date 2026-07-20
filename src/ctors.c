@@ -15,17 +15,28 @@
  * that were never going to initialise.
  *
  * Finding the table is the interesting part. There are no section headers to
- * rely on after decryption, and vtables look almost identical — both are runs
- * of code pointers in read-only data. Two properties separate them:
+ * rely on after decryption, and vtables look almost identical -- both are runs
+ * of code pointers in read-only data.
  *
- *   - A constructor table is null-terminated. Vtables are not, in general.
- *   - Its entries take no arguments and are reached by nothing else, so they
- *     have no callers anywhere in the image.
+ * A discriminator that seems obvious does NOT work: "constructor entries have
+ * no callers". Vtable entries have no callers either -- they are reached
+ * through a vptr, never by name -- so the test accepts 1327 candidates in
+ * Lumberjack, which is useless. Measured, not assumed.
  *
- * The second is the discriminating one and the first is cheap, so the search
- * uses the first to propose candidates and leaves confirmation to the caller,
- * which knows what discovery found.
- */
+ * What does separate them, in decreasing order of reliability:
+ *
+ *   - Null termination. Vtables are generally followed by more data.
+ *   - Entry locality: a constructor table's targets cluster in one region
+ *     that holds little else, because the compiler emits them together.
+ *     Lumberjack's eight all fall in 0x3B2AF8..0x3B2FCC, above .text.
+ *   - Arity: constructors take only `this`, so their first use of $a1-$a3
+ *     without a preceding write is a strong negative.
+ *
+ * This implementation uses null termination alone and returns the single
+ * longest candidate, which found the right table here but is not sufficient in
+ * general -- and returning only the best would hide a second, shorter array.
+ * Enumerating candidates and scoring them on locality is the improvement worth
+ * making before this is trusted on another title. */
 
 #include "psprecomp/ctors.h"
 #include "psprecomp/mem.h"
