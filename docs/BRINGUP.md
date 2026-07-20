@@ -1285,3 +1285,60 @@ a callee-saved register.
 2. Check what `0x0000E06C` returns. It is the program''s allocator, called here
    for 32 bytes, and a null return sends control into the error path
    immediately below.
+
+---
+
+# Root cause: $k0 is never set
+
+```
+0000DD24  beq $k0, $zero, 0x0000DD44   ; k0 == 0 -> fallback path
+0000DD28  lui $v0, 0x3B
+0000DD2C  lw  $v0, 4($k0)              ; reent = *(k0 + 4)
+0000DD30  beq $v0, $zero, 0x0000DD40
+```
+
+`$k0` is the PSP''s **thread pointer**. The kernel keeps a pointer to the
+running thread''s control block there, and libc reaches its per-thread `reent`
+structure -- which carries the **malloc state** -- through it.
+
+The runtime has never set `$k0`. It is zero, so this takes the fallback branch
+every time.
+
+## The complete chain
+
+```
+$k0 = 0
+  -> _getmodreent takes its fallback           ("libc:_getmodreent: no reent structure")
+  -> the allocator at 0x0000E06C gets no heap
+  -> the 32-byte allocation at 0x000743F8 returns null
+  -> 0x00074400 branches into the error path
+  -> the seventeen sub-object constructors never run
+  -> their vptr words stay zero
+  -> the dispatch loop at 0x00066C6C calls through null
+  -> the hash tables those subsystems own stay zeroed
+  -> the chain walk at 0x0004DD14 self-loops, 10 billion iterations
+```
+
+Every symptom recorded in this document hangs off that one unset register.
+The `_getmodreent` warning has been in the logs since the earliest runs and was
+noted as "returns a *working* fallback" -- it does return something, but a
+fallback reent has no heap, and every allocation through it fails.
+
+## Why this took so long to see
+
+The search kept starting from the symptom and walking up. `$k0` never appears
+in a trace, a register dump of `$a0`-`$s3`, or a call graph -- it is read by one
+libc function, three levels below anything that looked interesting. The report
+printed `ra/sp/gp/v0/v1/a0/a1/s0-s3` and would have shown this immediately had
+it printed `$k0`.
+
+## Next
+
+1. Set `$k0` to a thread control block whose `+4` points at a `reent` with a
+   working heap. `threadman` already models threads; this is where the TCB
+   should come from, and the host should install `$k0` for the initial thread
+   before entering `module_start`.
+2. Verify by watching `0x000743F0`: the allocation at `+0x8` should return
+   non-null and `0x00074400` should fall through rather than branch.
+3. Expect further gaps once allocation works -- but every stall recorded here
+   is downstream of this one register.
