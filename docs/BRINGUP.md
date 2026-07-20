@@ -50,25 +50,62 @@ the host never set it. Setting it from the module info's `gp_value`
 `$gp` is still correct and should be part of a real loader — it simply is not
 what causes this.
 
-## The remaining hypothesis
+**The `_getmodreent` message itself.** This turned out to be a red herring, and
+the way it was eliminated is worth keeping: rather than looking for a reference
+describing how newlib finds its per-module reent structure, the function is
+*in the module* and can simply be read.
 
-**There is no module loader.** The host copies the `PT_LOAD` segment to its
-link address and jumps straight to `module_start`. On hardware the kernel does
-substantial work first:
+Locating the string `_getmodreent` (vaddr `0x0009446C`) and searching `.text`
+for the `lui`/`addiu` pair that materialises it gives exactly one referencing
+site, `0x0000F3C0`. The code around it:
 
-- applies the module's relocations,
-- sets up TLS and the per-module reentrancy structure,
-- registers the module so it can be found by id or address.
+```
+0000F358  lw    $v0, 132($a1)      walk a linked list of module records
+0000F35C  beq   $v0, $a3, 0xF3E4   match -> success path
+0000F364  lw    $a2, 0($a2)        next node
+0000F368  bne   $a2, $zero, 0xF358 loop while the list continues
+          ...                      not found: print the warning
+0000F3D0  lw    $v0, -14272($v0)   return *(0x003AC840)
+```
 
-`_getmodreent` is looking for something a loader was supposed to have built.
-That the failure appears *before any firmware call made during execution* fits
-this and fits nothing else that has been tested.
+So the function walks a module registry, fails to find this module — because
+nothing ever registered it, which *is* a genuine loader gap — prints a warning,
+and then returns a **fallback**. The word at `0x003AC840` in the image is
+`0x003AC4C0`, a valid `.data` address: a global reent structure.
 
-Note the relocations have so far been used only for *discovery* (finding
-function pointers). They have never been *applied* to the image. For a PRX
-linked at 0 and loaded at 0 the addend is zero and most relocations are
-no-ops — but that assumption has not been verified, and the segment-relative
-forms in a PSP PRX are not plainly "add the load base".
+**It does not return null.** The warning is benign and the fallback works. The
+message merely happens to be printed before the first dispatch miss; it does
+not cause it. Two rounds of investigation were spent on the assumption that it
+did.
+
+The missing module registration remains real and should still be fixed by a
+loader — it is simply not fatal, and not the thing to chase first.
+
+## What is actually still open
+
+With the reent warning eliminated as the cause, the wild pointer walk has **no
+current explanation**. What is known:
+
+- It is a loop reading a function-pointer table at a base near address 8,
+  misaligned by two, and calling each entry.
+- It is not a jump table, not the reent fallback, not `$gp`, and not the
+  ModuleMgr id.
+
+The next move is to find which recompiled function performs that loop, rather
+than guessing at causes. The dispatch miss handler knows the bad target but not
+the caller; recording the caller — or simply recompiling with a breakpoint on
+`psp_dispatch` and reading the C stack — would name it directly. That is a
+better instrument than another hypothesis.
+
+**Relocations are verified as no-ops.** All 27,269 entries in Lumberjack carry
+`(offsetSegment, addendSegment) = (0, 0)` against a single segment at vaddr 0,
+so applying them at load base 0 changes nothing. This was previously an
+untested assumption; it holds, and relocation application is off the loader's
+critical path.
+
+**A loader is still wanted** for module registration and TLS/reent setup, and
+to set `$gp` properly rather than from the host. None of that is on the
+critical path for the current failure.
 
 ## Suggested next steps
 
