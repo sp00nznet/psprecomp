@@ -146,6 +146,8 @@ void psp_sysmem_release(uint32_t addr) {
 /* ---- the calls ----------------------------------------------------------- */
 
 static void hle_AllocPartitionMemory(void) {
+    fprintf(stderr, "AllocPartitionMemory: part=%u name=0x%08X type=%u size=%u attr=0x%X (%u free)\n",
+            psp_arg(0), psp_arg(1), psp_arg(2), psp_arg(3), psp_arg(4), psp_sysmem_free());
     /* (partitionid, name, type, size, addr) */
     uint32_t name_ptr = psp_arg(1);
     uint32_t type     = psp_arg(2);
@@ -160,12 +162,15 @@ static void hle_AllocPartitionMemory(void) {
     uint32_t align = 0x100;
     if (type == PSP_SMEM_LowAligned || type == PSP_SMEM_HighAligned) {
         align = want ? want : 0x100;
-        if (align & (align - 1)) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_ATTR); return; }
+        /* EXPERIMENT: a non-power-of-two alignment is rejected by hardware,
+         * and Lumberjack passes 0x3AC85C -- a data address, not an alignment.
+         * Either the fifth argument is not being read from the right stack
+         * slot, or the caller never wrote it. Falling back to the 256-byte
+         * granule instead of failing says which: if the game proceeds, the
+         * argument is the only problem. */
+        if (align & (align - 1)) align = 0x100;
         if (align < 0x100) align = 0x100;
     }
-
-    fprintf(stderr, "AllocPartitionMemory: part=%u type=%u size=%u (%u free)\n",
-            psp_arg(0), type, size, psp_sysmem_free());
 
     uint32_t addr = 0;
     switch (type) {

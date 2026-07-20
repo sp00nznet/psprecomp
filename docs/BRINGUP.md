@@ -3328,3 +3328,57 @@ single measurement splits the remaining space in half and needs no new theory.
 
 This is a good place to hand off: the question is small, entirely inside
 psprecomp, and every surrounding fact is verified rather than assumed.
+
+---
+
+# The heap allocation succeeds
+
+The four-fact contradiction was **my own instrumentation**: the `fprintf` sat
+after an early return inside `hle_AllocPartitionMemory`, so the handler was
+running all along and the log could never fire. Instrumenting `psp_hle_call`
+itself proved entry, and moving the print to the top of the handler produced:
+
+```
+AllocPartitionMemory: part=2 name=0x00093058 type=3 size=15976448
+                      attr=0x3AC85C (20840448 free)
+```
+
+`type=3` is `PSP_SMEM_LowAligned`, and the fifth argument -- the alignment --
+is `0x3AC85C`. That is a data address, not a power of two, so the handler took
+its `ILLEGAL_ATTR` early return every time.
+
+Falling back to the 256-byte granule instead of rejecting:
+
+```
+                      before              after
+user memory free      20,840,448          4,864,000   (15.9 MB allocated)
+loop back-edge hits   ~2,400,000,000      765
+dispatch misses       19                  1
+```
+
+**The heap is established and the spin is gone.** Execution now proceeds
+normally through `0x0000E6C0`-`0x0000E73C` -- allocator internals -- rather than
+looping on an uninitialised structure. Every symptom this document chased for
+its entire length traced back to this one rejected allocation.
+
+## What is not yet right
+
+The alignment argument is still wrong, and the shim hides that rather than
+fixing it. `0x3AC85C` arriving where a power of two belongs means either
+`psp_arg(4)` reads the wrong stack slot, or the recompiled caller never wrote
+the fifth argument. o32 places argument five at `sp+16`, which is what
+`psp_arg(4)` reads -- so the caller is the more likely fault, and that is a
+codegen question of exactly the kind `$ra` already turned out to be.
+
+Execution now stops earlier (`GE: 0 lists`) because it takes a different, and
+presumably correct, path -- 265 function entries in the watchdog window against
+470 before. That is not a regression: the previous run reached the GE only to
+spin forever afterwards.
+
+## Next
+
+1. Find why argument five is `0x3AC85C`. Disassemble the caller of
+   `sceKernelAllocPartitionMemory` at `0x00000290` and check whether it writes
+   `sp+16` before the call. If it does, `psp_arg` is wrong; if not, the emitter
+   is dropping a stack argument store.
+2. Then remove the granule fallback -- it is a bring-up shim, not a fix.

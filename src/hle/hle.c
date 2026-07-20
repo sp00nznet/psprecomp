@@ -103,6 +103,8 @@ void psp_hle_dump_recent(FILE *out) {
 }
 
 void psp_hle_call(uint32_t nid) {
+    if (nid == 0x237DBD4Fu)
+        fprintf(stderr, "psp_hle_call ENTERED for 0x237DBD4F (%d entries registered)\n", g_count);
     for (int i = 0; i < g_count; i++) {
         if (g_entry[i].nid == nid) {
             g_fn[i]();
