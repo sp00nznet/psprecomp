@@ -2634,3 +2634,40 @@ implementation.
 Everything above is measured. The open question is one structure: seventeen
 asset records whose resource lists at `+184` read zero where an empty circular
 list must point at itself.
+
+## The "never a jal target" discriminator fails too
+
+```
+constructor-table candidates (never jal'd, null-terminated): 1383
+```
+
+The test validates correctly on known inputs -- the real constructor
+`0x003B2B40` is not a `jal` target, an ordinary function `0x0004DBB0` is -- and
+still accepts 1383 arrays. Same reason as the no-callers test: **vtable methods
+are never `jal`''d either**, because virtual dispatch goes through `jalr`.
+
+Two proposed discriminators, both plausible, both measured, both useless. They
+were the same property wearing different clothes: "is not called by name" does
+not distinguish a constructor from a virtual method, and every entry in either
+kind of table qualifies.
+
+What remains, and it is the only thing that has actually worked: **the code
+region**. Lumberjack''s constructors occupy `0x3B2AF8..0x3B2FCC`, above `.text`,
+holding little else; exactly one null-terminated array points there. The
+generalisable form is to find code regions that no static call reaches *and*
+that no vtable references, then look for arrays into them -- the second half
+being what both failed tests omitted.
+
+This is worth recording precisely because it was cheap to test and expensive to
+assume. Two sections of this document previously asserted the first
+discriminator as fact.
+
+# Closing state
+
+`pixels written: 0`. WTF does not render.
+
+One open structure: seventeen asset records whose resource lists at `+184` read
+zero where an empty circular list must point at itself. The static-constructor
+pass fixes exactly this defect for a different family of lists, so the
+initialiser for these is either in a second table -- not findable by any test
+tried so far -- or in a routine start-up has not yet reached.
