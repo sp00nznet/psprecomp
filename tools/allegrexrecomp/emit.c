@@ -327,6 +327,37 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_MTC0: case A_CTC0: case A_MTIC:
         fprintf(f, "%s;  /* COP0 write ignored */\n", ind); return;
 
+    /* --- VFPU: the subset with a real implementation. Everything else in the
+       vector unit still falls through to a trap below, which is deliberate --
+       see include/psprecomp/vfpu.h. --- */
+    case A_LV_S:
+        fprintf(f, "%spsp_lv_s(%u, %s + %d);\n", ind, in->vt, rs, in->imm & ~3); return;
+    case A_LV_Q:
+        fprintf(f, "%spsp_lv_q(%u, %s + %d);\n", ind, in->vt, rs, in->imm & ~3); return;
+    case A_SV_S:
+        fprintf(f, "%spsp_sv_s(%u, %s + %d);\n", ind, in->vt, rs, in->imm & ~3); return;
+    case A_SV_Q:
+        fprintf(f, "%spsp_sv_q(%u, %s + %d);\n", ind, in->vt, rs, in->imm & ~3); return;
+
+    case A_VADD:
+        fprintf(f, "%spsp_vadd(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VSUB:
+        fprintf(f, "%spsp_vsub(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VMUL:
+        fprintf(f, "%spsp_vmul(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VDIV:
+        fprintf(f, "%spsp_vdiv(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VMIN:
+        fprintf(f, "%spsp_vmin(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VMAX:
+        fprintf(f, "%spsp_vmax(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VDOT:
+        fprintf(f, "%spsp_vdot(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VSCL:
+        fprintf(f, "%spsp_vscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VCMP:
+        fprintf(f, "%spsp_vcmp(%u, %u, %u, %u);\n", ind, in->vd & 0xF, in->vs, in->vt, in->vsize); return;
+
     case A_SYSCALL:
         fprintf(f, "%spsp_syscall(0x%05Xu);\n", ind, (in->raw >> 6) & 0xFFFFF); return;
     case A_BREAK:
@@ -561,6 +592,7 @@ static void emit_header(FILE *f, const a_analysis *an, const emit_opts *o) {
         "\n"
         "#include <psprecomp/recomp_rt.h>\n"
         "#include <psprecomp/dispatch.h>\n"
+        "#include <psprecomp/vfpu.h>\n"
         "\n"
         "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
         "\n"

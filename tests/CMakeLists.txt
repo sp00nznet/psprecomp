@@ -31,3 +31,7 @@ add_test(NAME emit COMMAND test_emit)
 add_executable(test_hle test_hle.c)
 target_link_libraries(test_hle PRIVATE psprecomp allegrex_core)
 add_test(NAME hle COMMAND test_hle)
+
+add_executable(test_vfpu test_vfpu.c)
+target_link_libraries(test_vfpu PRIVATE psprecomp)
+add_test(NAME vfpu COMMAND test_vfpu)
