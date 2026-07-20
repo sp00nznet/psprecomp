@@ -1240,3 +1240,48 @@ value -- search for where it is produced. A wrong return value from an HLE
 call, a read through an uninitialised pointer, or a register clobbered across a
 call would each produce it, and they are distinguishable by watching the
 caller's `$a0` immediately before the call.
+
+## Correction: 0x000743F0 does not take an object pointer
+
+```
+000743F0  lw   $a1, 0($s3)         ; uses $s3 -- set by earlier code
+000743F4  jal  0x0000E06C          ; allocate
+000743F8  addiu $a0, $zero, 32     ; ...32 bytes
+000743FC  addu $s4, $v0, $zero
+00074400  bnel $s4, $zero, 0x0007443C
+```
+
+It begins by reading through **`$s3`** and immediately overwrites `$a0` with
+the constant 32 for an allocation call. `$a0` is not its argument -- this
+address is a *continuation inside a larger function* that discovery split into
+a separate entry, not a function entry with a calling convention.
+
+So `a0 = 0x6A5DE983` observed at the watch was a leftover register value with no
+meaning at that point, and the previous section's conclusion -- "entered with a
+garbage object pointer" -- is **void**. The value also appears nowhere in the
+file image, consistent with it simply being stale.
+
+This is the third time a split-out continuation has been mistaken for a real
+function in this investigation. The watch mechanism reports whatever `$a0`
+holds; it cannot know whether the address it fires on is an ABI boundary.
+**Before reading arguments at a watch, check that the address is a genuine
+entry** -- a prologue (`addiu $sp, ...`) or first use of `$a0`-`$a3` rather than
+a callee-saved register.
+
+## What survives
+
+- `0x000743F0` runs; `0x0007EAE8` does not. The reachability boundary is real
+  and was measured, independent of the argument mistake.
+- The seventeen constructors and their five ancestor levels never run.
+- `0x000743F0` allocates 32 bytes via `0x0000E06C` and branches on the result
+  being null -- so the allocator's return value is worth checking, given
+  `psp_sysmem_free()` reports 20 MB free but the HLE allocator has never been
+  exercised against this path.
+
+## Next
+
+1. Find the real entry of the function containing `0x000743F0` and watch that
+   instead, then read `$s3`.
+2. Check what `0x0000E06C` returns. It is the program''s allocator, called here
+   for 32 bytes, and a null return sends control into the error path
+   immediately below.
