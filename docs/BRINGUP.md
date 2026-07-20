@@ -2356,3 +2356,21 @@ initialiser for *this* structure is either:
 
 The second is the more likely and the cheaper to check: mark-test whether the
 code between `0x00018318` and the stall contains an initialiser for it.
+
+## Static constructors are now part of the toolkit
+
+`src/ctors.c` + `include/psprecomp/ctors.h`, with `psp_ctors_find()` and
+`psp_ctors_run()`. Ten tests in `tests/test_ctors.c`.
+
+The find is a *proposal*, not a proof, and the tests say so by pinning what it
+must reject: an unterminated run (vtables look identical otherwise), a single
+pointer followed by zero (occurs everywhere in ordinary data), and pointers
+outside the code range. Mistaking a vtable for a constructor table would call
+arbitrary methods with no arguments during start-up -- a failure that would
+look like anything except its cause, which is exactly the class of bug this
+whole document is a record of.
+
+Running the constructors belongs at load time. The host currently calls them
+explicitly; a real module loader should do it as part of bringing a PRX up,
+because *every* recompiled C++ module has this problem and none of them will
+report it.

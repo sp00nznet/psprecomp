@@ -36,6 +36,10 @@ add_executable(test_vfpu test_vfpu.c)
 target_link_libraries(test_vfpu PRIVATE psprecomp)
 add_test(NAME vfpu COMMAND test_vfpu)
 
+add_executable(test_ctors test_ctors.c)
+target_link_libraries(test_ctors PRIVATE psprecomp)
+add_test(NAME ctors COMMAND test_ctors)
+
 add_executable(test_raster test_raster.c)
 target_link_libraries(test_raster PRIVATE psprecomp)
 add_test(NAME raster COMMAND test_raster)
