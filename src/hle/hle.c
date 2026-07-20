@@ -79,4 +79,8 @@ void psp_hle_init(void) {
     psp_ge_register();
     psp_sas_init();
     psp_sas_register();
+    psp_io_init();
+    psp_io_register();
+    psp_misc_init();
+    psp_misc_register();
 }

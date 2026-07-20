@@ -41,6 +41,8 @@ add_library(psprecomp STATIC
     src/hle/display.c
     src/hle/ge.c
     src/hle/sascore.c
+    src/hle/iofilemgr.c
+    src/hle/misc.c
 )
 
 target_include_directories(psprecomp PUBLIC

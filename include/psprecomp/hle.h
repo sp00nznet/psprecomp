@@ -111,6 +111,19 @@ void psp_sas_reset(void);
 uint64_t psp_sas_frames(void);
 uint64_t psp_sas_nonzero(void);
 
+void psp_io_init(void);
+void psp_io_register(void);
+void psp_io_reset(void);
+void psp_io_set_root(const char *root);
+uint64_t psp_io_bytes_read(void);
+
+void psp_misc_init(void);
+void psp_misc_register(void);
+void psp_misc_reset(void);
+int  psp_exit_requested(void);
+void psp_ctrl_set(uint32_t buttons, uint8_t ax, uint8_t ay);
+uint64_t psp_audio_blocks(void);
+
 void psp_threadman_init(void);
 void psp_threadman_register(void);
 void psp_threadman_reset(void);
