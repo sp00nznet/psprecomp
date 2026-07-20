@@ -158,6 +158,23 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                 }
             }
 
+            /* A branch or tail-jump into the import thunks is a call into
+             * firmware by another name. It cannot be followed — the thunks are
+             * patched at load time and their file contents are meaningless —
+             * but it must be *recorded*, because the emitter decides what is an
+             * import purely by address range. If the walk does not record it,
+             * the generated code references psp_import_<addr> and the imports
+             * file never defines it: a link error, and one that only shows up
+             * on a module whose imports are not all reached by `jal`.
+             *
+             * The stub region sits immediately after `.text`, so it is outside
+             * the analysed range and the branch/jump paths below skip it
+             * silently. Hence the explicit check here. */
+            if (in.has_target && !in.is_indirect && is_import_stub(an, in.target)) {
+                if (!u32_contains(c->imports, in.target))
+                    u32_push(c->imports, in.target);
+            }
+
             if (in.is_call) {
                 /* jal / jalr / the *al REGIMM forms. Direct calls give us a
                  * new function; indirect ones we cannot resolve statically. */
@@ -343,6 +360,28 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     free(seen);
     free(entry_map);
     return 0;
+}
+
+int a_scan_data_pointers(const a_analysis *an,
+                         const uint8_t *region, uint32_t region_len,
+                         uint32_t *out, int max) {
+    int found = 0;
+
+    for (uint32_t off = 0; off + 4 <= region_len; off += 4) {
+        uint32_t v = (uint32_t)region[off] | ((uint32_t)region[off + 1] << 8) |
+                     ((uint32_t)region[off + 2] << 16) | ((uint32_t)region[off + 3] << 24);
+
+        if (!a_in_range(an, v)) continue;        /* inside the code extent */
+
+        /* Point at something that decodes. A pointer into the middle of a data
+         * table would usually fail this; a genuine function entry never does. */
+        a_insn in;
+        if (!a_decode(fetch(an, v), v, &in) || in.op == A_INVALID) continue;
+
+        if (found < max) out[found] = v;
+        found++;
+    }
+    return found;
 }
 
 void a_analysis_free(a_analysis *an) {

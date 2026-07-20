@@ -146,7 +146,35 @@ typedef struct {
     uint32_t modinfo_addr, modinfo_offset, modinfo_size;
 
     int      nsections;
+    /* Kept so the relocation tables can be re-walked without re-deriving
+     * where the section header table is. */
+    uint32_t shoff, shentsize, shnum;
 } elf_info;
+
+/* MIPS relocation types we care about. `r_info`'s low byte is the type; on a
+ * PRX the upper bytes carry segment indices rather than a symbol index. */
+#define R_MIPS_32    2
+#define R_MIPS_26    4
+#define R_MIPS_HI16  5
+#define R_MIPS_LO16  6
+
+/* Harvest candidate function pointers from the relocation tables.
+ *
+ * `jal` reaches functions that are *called* directly, but a PSP module also
+ * reaches code through stored pointers: thread entry points, callbacks,
+ * vtables, and jump tables. Those are invisible to any control-flow scan —
+ * and they are exactly what the loader has to patch, so the relocation tables
+ * enumerate them precisely.
+ *
+ * An R_MIPS_32 relocation names a word that holds an address. If that address
+ * lands in `.text` and is instruction-aligned, it is a function pointer. This
+ * is enumeration, not guesswork: the linker recorded it because it *is* an
+ * address.
+ *
+ * Returns the number found (may exceed `max`, in which case only `max` were
+ * written). */
+int psp_collect_pointer_seeds(const uint8_t *data, size_t len, const elf_info *e,
+                              uint32_t load_bias, uint32_t *out, int max);
 
 int elf_parse(const uint8_t *data, size_t len, elf_info *out);
 

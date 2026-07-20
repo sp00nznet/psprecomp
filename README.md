@@ -189,14 +189,30 @@ harvest of `jal` targets, over all six modules on the WTF disc:
 
 | Module | `.text` | functions | reached | instructions | VFPU | imports |
 |---|---:|---:|---:|---:|---:|---:|
-| Lumberjack | 584 KB | 2206 | 75.0% | 112,026 | **0.19%** | 134 |
-| Lumberjack Challenge | 586 KB | 2211 | 75.0% | 112,541 | **0.19%** | 134 |
-| Séance | 601 KB | 2312 | 75.6% | 116,283 | **0.18%** | 134 |
-| Pendemonium | 603 KB | 2292 | 75.0% | 115,755 | **0.18%** | 134 |
-| Baseball Superstar | 656 KB | 2428 | 71.8% | 120,620 | **0.20%** | 134 |
-| `hell2k` (main) | 961 KB | 3410 | 70.2% | 172,794 | **0.14%** | 184 |
+| Lumberjack | 584 KB | 3376 | 89.0% | 132,979 | **0.16%** | 137 |
+| Lumberjack Challenge | 586 KB | 3381 | 89.1% | 133,688 | **0.16%** | 137 |
+| Séance | 601 KB | 3484 | 89.2% | 137,181 | **0.15%** | 137 |
+| Pendemonium | 603 KB | 3485 | 89.3% | 137,880 | **0.15%** | 137 |
+| Baseball Superstar | 656 KB | 3886 | 88.2% | 148,217 | **0.16%** | 137 |
+| `hell2k` (main) | 961 KB | 5419 | 88.1% | 216,743 | **0.11%** | 204 |
 
 Zero invalid instructions in any of them.
+
+Seeds come from four places, in increasing order of what they find: the entry
+point, the export table, a linear harvest of `jal` targets, and the
+**relocation tables**. That last one took coverage from 75% to 89%: an
+`R_MIPS_32` relocation names a word that holds an address, which is exactly the
+set of stored function pointers — thread entries, callbacks, vtables — that no
+control-flow scan can see. It is enumeration, not guesswork; the linker
+recorded them because they *are* addresses. (A PSP PRX tags those sections
+`SHT_PRXRELOC`, not `SHT_REL` — checking only for the generic type finds
+nothing at all.)
+
+`EBOOT.BIN` needed a different answer: it is statically linked (`ET_EXEC`), so
+its relocation sections are **empty** — absolute addresses need no patching.
+There the fallback is recognising pointers by shape (in range,
+instruction-aligned, decodes as an instruction), which is a **heuristic** and
+is kept separate and labelled as one. 70% → 88%.
 
 **The VFPU is 0.2% of this game.** Only ~2% of functions touch it at all. The
 reason the PSP is usually called a hard recompilation target turns out not to
@@ -230,15 +246,15 @@ them, and is the next step.
 
 ## The emitter — a real game compiles and links
 
-`allegrexrecomp emit` turns discovered functions into C. On Lumberjack it
-produces **2,206 functions across 256,566 lines**, and that output **compiles
-with MSVC, links against the runtime, and runs**:
+`allegrexrecomp emit` turns discovered functions into C, and that output
+**compiles with MSVC, links against the runtime, and runs** — for the
+microgames *and* for WTF's main executable:
 
 ```
-$ gencheck.exe
-registered 2212 recompiled functions
-memory: 32 MB RAM, 2048 KB VRAM, 16 KB scratchpad
-module_start 0x000183AC -> resolved
+$ gencheck.exe                     $ ebootcheck.exe
+registered 3376 functions          registered 5419 functions
+module_start 0x000183AC ->         module_start 0x089A3270 ->
+    resolved                           resolved
 ```
 
 That is the whole pipeline end to end: **disc → decrypt → discover → emit →
@@ -297,9 +313,31 @@ error in a quarter of a million lines:
   point, so emitting from `addr` forward silently dropped them. Functions now
   carry a `start` as well as an `end`.
 
-Anything not yet translated — the VFPU, 0.19% of instructions — emits a
+And one that only the *main* executable exposed, at link time rather than
+compile time: **an import reached by a branch or tail-jump rather than `jal`**.
+The emitter classifies imports by address range, but discovery only recorded
+the ones it called — and the stub region sits just outside `.text`, so the
+branch paths skipped it silently. Lumberjack linked fine because all of its
+imports happen to be reached by `jal`; `hell2k` did not.
+
+Anything not yet translated — the VFPU, 0.11–0.16% of instructions — emits a
 **named run-time trap**, never silence. A gap that announces itself is worth
 far more than one that produces a program which runs and is wrong.
+
+## The remaining ~11%
+
+Not yet reached, and honestly accounted for rather than rounded away:
+
+- **Jump tables.** 60 unresolved computed-jump sites in Lumberjack, 102 in
+  `hell2k`. The `lui`/`addiu`/`sll`/`addu`/`lw`/`jr` idiom is recognisable and
+  resolvable; until then those `jr`s route through the dispatch table, which
+  now often *works*, because relocation seeding registered the table entries as
+  functions.
+- **Boundary quality.** Relocation seeding pushed `no jr $ra` from 93 to 502 on
+  Lumberjack. Some pointer seeds are jump-table entries — real code addresses,
+  but mid-function labels rather than function entries — so they over-split.
+  Over-splitting is the safe direction (the code is still correct and still
+  reachable through dispatch) but the count is a live signal, not noise.
 
 **Not started yet:** the HLE library, the interpreter oracle.
 

@@ -101,6 +101,28 @@ typedef struct {
  * Call a_analysis_free() when done. */
 int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds);
 
+/* Scan a data region for words that look like code addresses.
+ *
+ * This is the fallback for a **statically linked** module (ET_EXEC). A
+ * relocatable PRX lists its function pointers in the relocation tables, which
+ * is enumeration — the linker recorded them because they *are* addresses. A
+ * static executable has those addresses baked in absolutely and its relocation
+ * sections are empty, so there is nothing to enumerate and the only option is
+ * to recognise them by shape.
+ *
+ * That makes this a **heuristic, not a fact**, and it is kept separate and
+ * named accordingly so nobody later mistakes one for the other. Three filters
+ * keep the false-positive rate down: the value must land inside the code
+ * extent, be instruction-aligned, and point at something that actually decodes
+ * as a valid instruction. A survivor that is nonetheless data shows up as a
+ * function that never reaches `jr $ra`, which the report counts.
+ *
+ * `region` is the raw bytes to scan; `out` receives candidate addresses.
+ * Returns the number found (may exceed `max`). */
+int a_scan_data_pointers(const a_analysis *an,
+                         const uint8_t *region, uint32_t region_len,
+                         uint32_t *out, int max);
+
 void a_analysis_free(a_analysis *an);
 
 /* Is `addr` inside the discovered code extent? */

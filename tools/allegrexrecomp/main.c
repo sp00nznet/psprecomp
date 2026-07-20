@@ -458,7 +458,8 @@ static int cmd_cover(const char *path) {
  * owns both `b` (psp_blob_free) and `an` (a_analysis_free). Shared by `funcs`
  * and `emit`, which differ only in what they do with the result. */
 static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
-                             a_analysis *an, int *out_nseeds, int *out_nexports) {
+                             a_analysis *an, int *out_nseeds, int *out_nexports,
+                             int *out_nptr, int *out_scanned) {
     if (psp_blob_read(path, b) != 0) { fprintf(stderr, "cannot read %s\n", path); return -1; }
 
     if (psp_sniff(b->data, b->size < 16 ? b->size : 16) != FMT_ELF ||
@@ -477,25 +478,69 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
     an->stub_size = e->stub_size;
     an->scan_calls = 1;
 
-    /* Seeds: the module entry point, plus every exported function. Exports
-     * matter because a library entry that nothing internal calls is
-     * unreachable from the entry point alone. */
-    uint32_t seeds[544];
+    /* Seeds come from three places, in increasing order of how much they find:
+     *
+     *   1. the module entry point
+     *   2. the export table — a library entry nothing internal calls is
+     *      unreachable from the entry point alone
+     *   3. R_MIPS_32 relocations pointing into .text — the stored function
+     *      pointers behind thread entries, callbacks and vtables, which no
+     *      control-flow scan can see
+     *
+     * (`jal` targets are harvested separately, inside discovery itself.) */
+    const uint32_t bias = e->nsegments ? e->seg[0].offset - e->seg[0].addr : 0;
+
+    /* Size the buffer from an actual count rather than a guessed maximum. */
+    int nptr_avail = psp_collect_pointer_seeds(b->data, b->size, e, bias, NULL, 0);
+    int cap = 1 + 512 + nptr_avail;
+    uint32_t *seeds = (uint32_t *)malloc((size_t)cap * sizeof *seeds);
+    if (!seeds) { psp_blob_free(b); return -1; }
+
     int nseeds = 0;
     seeds[nseeds++] = e->entry;
 
     psp_module_info mi;
     int nexports = 0;
-    const int cap = (int)(sizeof seeds / sizeof seeds[0]);
     if (e->modinfo_size && psp_modinfo_parse(b->data, b->size, e->modinfo_offset, &mi) == 0) {
-        uint32_t bias = e->nsegments ? e->seg[0].offset - e->seg[0].addr : 0;
-        nexports = psp_collect_exports(b->data, b->size, &mi, bias,
-                                       seeds + nseeds, cap - nseeds);
-        if (nexports > cap - nseeds) nexports = cap - nseeds;
+        nexports = psp_collect_exports(b->data, b->size, &mi, bias, seeds + nseeds, 512);
+        if (nexports > 512) nexports = 512;
         nseeds += nexports;
     }
 
-    if (a_discover(an, seeds, nseeds) != 0) {
+    int nptr = psp_collect_pointer_seeds(b->data, b->size, e, bias,
+                                         seeds + nseeds, cap - nseeds);
+    if (nptr > cap - nseeds) nptr = cap - nseeds;
+    nseeds += nptr;
+
+    /* A statically linked module (ET_EXEC) has empty relocation sections — its
+     * addresses are absolute, so there is nothing for the loader to patch and
+     * nothing to enumerate. Fall back to recognising pointers by shape, which
+     * is a heuristic rather than a fact and is only used when enumeration
+     * genuinely had nothing to offer. */
+    if (nptr == 0 && e->nsegments) {
+        const elf_segment *s = &e->seg[0];
+        uint32_t data_off = e->text_offset + e->text_size;
+        uint32_t seg_end  = s->offset + s->filesz;
+
+        if (data_off < seg_end && (size_t)seg_end <= b->size) {
+            uint32_t region_len = seg_end - data_off;
+            int avail = a_scan_data_pointers(an, b->data + data_off, region_len, NULL, 0);
+
+            uint32_t *bigger = (uint32_t *)realloc(seeds, (size_t)(nseeds + avail) * sizeof *seeds);
+            if (bigger) {
+                seeds = bigger;
+                nptr = a_scan_data_pointers(an, b->data + data_off, region_len,
+                                            seeds + nseeds, avail);
+                if (nptr > avail) nptr = avail;
+                nseeds += nptr;
+                if (out_scanned) *out_scanned = 1;
+            }
+        }
+    }
+
+    int rc = a_discover(an, seeds, nseeds);
+    free(seeds);
+    if (rc != 0) {
         fprintf(stderr, "discovery failed (out of memory)\n");
         psp_blob_free(b);
         return -1;
@@ -503,6 +548,8 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
 
     if (out_nseeds)   *out_nseeds = nseeds;
     if (out_nexports) *out_nexports = nexports;
+    if (out_nptr)     *out_nptr = nptr;
+    (void)out_scanned;
     return 0;
 }
 
@@ -510,14 +557,16 @@ static int cmd_funcs(const char *path, int list) {
     psp_blob b;
     elf_info e;
     a_analysis an;
-    int nseeds = 0, nexports = 0;
+    int nseeds = 0, nexports = 0, nptr = 0, scanned = 0;
 
-    if (load_and_discover(path, &b, &e, &an, &nseeds, &nexports) != 0) return 1;
+    if (load_and_discover(path, &b, &e, &an, &nseeds, &nexports, &nptr, &scanned) != 0) return 1;
 
     printf("module:     %s\n", path);
     printf("code:       0x%08X + %u bytes  (%u instructions)\n",
            an.base, an.size, an.size / 4);
-    printf("seeds:      %d (entry 0x%08X + %d exports)\n", nseeds, e.entry, nexports);
+    printf("seeds:      %d (entry 0x%08X + %d exports + %d %s)\n",
+           nseeds, e.entry, nexports, nptr,
+           scanned ? "scanned data pointers (heuristic)" : "relocation pointers");
     printf("\n");
     printf("functions:  %d\n", an.nfuncs);
     printf("reached:    %u bytes (%.2f%% of .text)\n", an.bytes_reached,
@@ -584,7 +633,7 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
     elf_info e;
     a_analysis an;
 
-    if (load_and_discover(path, &b, &e, &an, NULL, NULL) != 0) return 1;
+    if (load_and_discover(path, &b, &e, &an, NULL, NULL, NULL, NULL) != 0) return 1;
 
     psp_module_info mi;
     const char *module = "(unknown)";

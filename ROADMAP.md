@@ -129,9 +129,20 @@ about being self-contained, which is a goal but not a gate.
       counted. This is what made the tail-call bug visible.
 - [x] **Validated across six real modules** — 2206-3410 functions each, ~75% of
       `.text` reached, **zero invalid instructions**, VFPU measured at 0.14-0.20%.
-- [ ] **Relocation mining** — `.rel.text` lists every address the loader
-      patches, including the function pointers behind callbacks, vtables and
-      thread entries. This is the principled way to reach the remaining ~25%.
+- [x] **Relocation mining** — R_MIPS_32 relocations name every word holding an
+      address, which is exactly the set of stored function pointers (thread
+      entries, callbacks, vtables) that no control-flow scan can see. This is
+      enumeration, not guesswork: the linker recorded them because they *are*
+      addresses. **75% -> 89% of `.text`** on the microgames, 2633 pointer
+      seeds on Lumberjack alone.
+      A PSP PRX tags these sections `SHT_PRXRELOC` (`0x700000A0`) rather than
+      `SHT_REL` (9); checking only for the generic type finds nothing at all.
+- [x] **Data-pointer scanning for static modules** — a statically linked
+      module (`ET_EXEC`, which is what `EBOOT.BIN` is) has *empty* relocation
+      sections, because absolute addresses need no patching. The fallback is to
+      recognise pointers by shape: in the code extent, instruction-aligned, and
+      pointing at something that decodes. Deliberately kept separate and named
+      as a **heuristic** rather than enumeration. **70% -> 88%** on `hell2k`.
 - [ ] **Jump-table resolution** — the `lui`/`addiu`/`sll`/`addu`/`lw`/`jr`
       idiom that MIPS compilers emit for `switch`. 38 unresolved sites in
       Lumberjack. Unresolved tables become dispatch-table lookups rather than

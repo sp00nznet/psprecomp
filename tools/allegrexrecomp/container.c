@@ -301,6 +301,10 @@ int elf_parse(const uint8_t *d, size_t len, elf_info *out) {
     uint16_t shstrndx  = rd16(d + 50);
     if (!shoff || shentsize < 40 || !shnum || shstrndx >= shnum) return 0;
 
+    out->shoff = shoff;
+    out->shentsize = shentsize;
+    out->shnum = shnum;
+
     /* Locate the section-name string table via its own section header. */
     size_t strhdr = (size_t)shoff + (size_t)shstrndx * shentsize;
     if (strhdr + 40 > len) return 0;
@@ -381,6 +385,52 @@ int psp_modinfo_parse(const uint8_t *d, size_t len, uint32_t file_offset,
     out->stub_top   = rd32(m + 0x2C);
     out->stub_end   = rd32(m + 0x30);
     return 0;
+}
+
+int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
+                              uint32_t load_bias, uint32_t *out, int max) {
+    if (!e->shoff || !e->shnum || !e->text_size) return 0;
+
+    const uint32_t text_lo = e->text_addr;
+    const uint32_t text_hi = e->text_addr + e->text_size;
+    int found = 0;
+
+    for (uint32_t i = 0; i < e->shnum; i++) {
+        size_t sh = (size_t)e->shoff + (size_t)i * e->shentsize;
+        if (sh + 40 > len) break;
+
+        uint32_t type = rd32(d + sh + 4);
+        /* A PSP PRX tags its relocation sections SHT_PRXRELOC (0x700000A0)
+         * rather than the generic SHT_REL (9). The entry layout is identical —
+         * only the section type differs — so checking for SHT_REL alone finds
+         * nothing at all on a real module. */
+        if (type != 9 && type != 0x700000A0u) continue;
+
+        uint32_t off  = rd32(d + sh + 16);
+        uint32_t size = rd32(d + sh + 20);
+        if ((size_t)off + size > len) continue;
+
+        /* Elf32_Rel is two words: r_offset, r_info. */
+        for (uint32_t r = 0; r + 8 <= size; r += 8) {
+            uint32_t r_offset = rd32(d + off + r);
+            uint32_t r_info   = rd32(d + off + r + 4);
+            if ((r_info & 0xFF) != R_MIPS_32) continue;
+
+            /* The relocated word holds the address. A PRX links at zero, so
+             * the stored value is already the module-relative address and
+             * needs no fixing up — only reading. */
+            size_t at = (size_t)r_offset + load_bias;
+            if (at + 4 > len) continue;
+
+            uint32_t target = rd32(d + at);
+            if (target < text_lo || target >= text_hi) continue;
+            if (target & 3) continue;            /* not instruction-aligned */
+
+            if (found < max) out[found] = target;
+            found++;
+        }
+    }
+    return found;
 }
 
 int psp_collect_exports(const uint8_t *d, size_t len,
