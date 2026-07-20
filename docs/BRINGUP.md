@@ -272,3 +272,51 @@ rather than by trace.
 3. Transformed geometry. The rasterizer currently handles through-mode only and
    *counts* transformed vertices rather than drawing them, deliberately: wrong
    pixels are harder to diagnose than no pixels.
+
+---
+
+# Falsified: the VFPU-garbage theory
+
+The standing hypothesis was that unimplemented VFPU ops left registers holding
+garbage and a convergence loop therefore never converged. `vcst`, `vidt`,
+`viim` and `vfim` are now implemented — `viim` needed a decoder fix too, since
+opcode `0x37` sub-values 6 and 7 were falling through to "unknown" and the
+`.word 0xDF3C00FF` at `0x0002F898` was in fact `viim.s v60, 255`.
+
+**The output is byte-for-byte identical.** Same 3 lists, same 254 commands,
+same hang. The theory is dead.
+
+That is a clean result and it cost one build: the ops needed implementing
+regardless, and the run says plainly that they were not what the loop was
+waiting on. Do not revisit this.
+
+## What the run actually points at
+
+The spin is inside `0x000471F4`, which calls `0x00046830` (the last traced
+entry) and then loops without calling anything else — which is why neither the
+dispatch counter nor the firmware log can see it.
+
+More promising, and visible in stderr just before the first null call:
+
+```
+libc:_getmodreent: no reent structure
+dispatch miss: 0x00000000 not recompiled       (x17)
+```
+
+`_getmodreent` is back. Earlier work established that it returns a *working*
+fallback rather than null, so this is not the old theory returning — but
+something downstream is reading a function pointer out of a structure that was
+never populated, getting zero, and calling it. 17 times, alongside 28 bad
+memory accesses.
+
+That is the thread to pull: find what writes the table those 17 null calls read
+from. A null callback that is silently skipped is exactly the shape of a
+program that then waits forever for something that callback was supposed to do.
+
+## Next
+
+1. Trace the 17 null dispatches to their call sites and find the unpopulated
+   table.
+2. Disassemble `0x000471F4` and read the loop condition directly — it will name
+   the memory it is waiting on.
+3. The 240 undecoded GE commands still hide whatever would set `vtype`.
