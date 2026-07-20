@@ -1026,3 +1026,48 @@ missing constructor pass on these call paths.
 `0x00067F70` is the remaining stride-loop candidate and has not been read yet.
 Read it first: if it constructs elements of the array, find who calls it and
 whether that caller runs.
+
+## Correction: the stride addresses above are all wrong by 0x60
+
+The byte-scan indexed the file and reported those offsets as addresses. The
+`PT_LOAD` segment starts at **file offset 0x60**, so every address in that table
+is 0x60 too high. The give-away was there and was missed: the scan reported
+`0x00066CE8` for the failing loop, which had already been disassembled at
+`0x00066C88` -- exactly 0x60 apart.
+
+Corrected, the three in-place strides are:
+
+```
+0x00066C88   addiu $s1, $s1, 1880   <- the failing dispatch loop
+0x00067824   addiu $s0, $s0, 1880
+0x00067F10   addiu $s0, $s0, 1880
+```
+
+So the previous section's reasoning about `0x00067884` sitting inside
+`0x00067844`'s string-compare path was about **a location that does not
+contain that instruction**. The conclusion drawn from it is void. (The
+disassembly quoted there was real; it just was not where the stride is.)
+
+Scan file offsets, report addresses -- and cross-check any new hit against an
+address already known by other means, which would have caught this instantly.
+
+## 0x00067F10 is the constructor loop
+
+```
+00067EFC  addiu $s2, $s2, 1
+00067F08  slti  $v0, $s2, 17
+00067F0C  bne   $v0, $zero, 0x00067E34    ; loop head
+00067F10  addiu $s0, $s0, 1880            ; stride, in the delay slot
+00067F14  addiu $s2, $zero, -1
+```
+
+Seventeen iterations, stride 1880, counter in `$s2` -- the same shape and the
+same array as the failing dispatch loop at `0x00066C6C`. **This is the pass
+that is supposed to build the seventeen sub-objects.**
+
+## Next
+
+1. Does `0x00067E34`'s enclosing function ever run? Put a watch on it. If it
+   never executes, find its caller; if it does execute, find why its stores do
+   not land.
+2. `0x00067824` is the remaining unexamined stride and should be read too.
