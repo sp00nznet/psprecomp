@@ -3823,3 +3823,60 @@ Two things follow, and both are checkable:
 The second is the more valuable: a function that leaves `$sp` unbalanced
 corrupts every callee-saved register its caller restores afterwards, and would
 do so for any game, not just this one.
+
+---
+
+# A stack-balance checker, and three real leaks
+
+The emitter now records `$sp` at every function entry and checks it at every
+`return` (3,866 sites). A recompiled function must leave `$sp` as it found it;
+one that does not corrupts every callee-saved register its caller restores
+afterwards, because the restores read `sp + offset` and a shifted `$sp` reads a
+neighbouring slot -- loading a plausible wrong value instead of failing.
+
+First run:
+
+```
+sp UNBALANCED in 0x0004D7BC: +16
+sp UNBALANCED in 0x0004D6F0: +16
+sp UNBALANCED in 0x0004C290: +16
+sp UNBALANCED in 0x0000F680: +16
+sp UNBALANCED in 0x0006D7D8: +16
+sp UNBALANCED in 0x0000E2A8: +48
+sp UNBALANCED in 0x0000E460: +48
+sp UNBALANCED in 0x0000D410: -16   <-- leak
+sp UNBALANCED in 0x0000E0AC: -48   <-- leak
+sp UNBALANCED in 0x0000E06C: -48   <-- leak
+```
+
+**`0x0000E06C` at -48 is exactly the drop measured earlier** between the two
+allocator calls, arrived at independently.
+
+## Reading the two signs
+
+**Positive deltas are mostly noise.** `0x0004D7BC` is not a function prologue --
+it is mid-loop code that discovery split into its own body. A body holding an
+epilogue but not its matching prologue legitimately raises `$sp`, and the
+invariant does not apply to it. That is a limitation of the check, not a bug in
+the game, and it should be suppressed by only checking bodies that begin with
+`addiu $sp, $sp, -N`.
+
+**Negative deltas are the dangerous ones**: stack consumed and never returned.
+Three of them, and they nest -- `0x0000E06C` calls `0x0000E0AC`, and both show
+-48, so the outer figure is inherited rather than independent. `0x0000D410` at
+-16 is the smallest and most likely the root.
+
+## Why this is worth having regardless
+
+This check finds a whole class of fault in one run that took most of a session
+to reach by tracing consequences. Every symptom chased in this document --
+garbage pointers, unconstructed objects, null vtables, self-looping lists -- is
+what a shifted stack frame produces. The checker states the invariant directly
+instead of waiting for it to be violated somewhere observable.
+
+## Next
+
+1. Suppress the false positives: only check bodies whose first instruction is a
+   stack decrement.
+2. Start at `0x0000D410` (-16), the innermost leak, and find the path through
+   it that skips its epilogue.

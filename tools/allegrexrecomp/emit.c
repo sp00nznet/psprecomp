@@ -587,6 +587,12 @@ static void emit_function(ectx *c, const a_func *fn) {
      * branches -- resolve by construction. */
     fprintf(f, "static void psp_body_%08X(uint32_t _entry) {\n", fn->addr);
     fprintf(f, "    PSP_ENTER(0x%08Xu);\n", fn->addr);
+    /* A function must leave $sp as it found it. Any that does not corrupts
+     * every callee-saved register its caller restores afterwards -- the
+     * restores read `sp + offset`, so a shifted $sp reads a different slot and
+     * loads a plausible wrong value rather than failing. Checking the
+     * invariant directly is far cheaper than tracing the consequences. */
+    fprintf(f, "    PSP_SP_ENTER();\n");
 
     int nlabels = 0;
     for (uint32_t a = fn->start; a < fn->end; a += 4)
@@ -699,7 +705,7 @@ static void emit_function(ectx *c, const a_func *fn) {
 
         if (in.is_return) {                      /* jr $ra */
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            fprintf(f, "    return;\n");
+            fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", fn->addr);
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
             continue;
@@ -719,7 +725,7 @@ static void emit_function(ectx *c, const a_func *fn) {
                 fprintf(f, "    goto L_%08X;\n", in.target);
             } else {
                 emit_static_call(c, in.target);  /* tail call */
-                fprintf(f, "    return;\n");
+                fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", fn->addr);
             }
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
@@ -796,10 +802,14 @@ static void emit_header(FILE *f, const a_analysis *an, const emit_opts *o) {
         "#ifdef PSPRECOMP_TRACE\n"
         "#  define PSP_ENTER(a) psp_trace_enter(a)\n"
         "#  define PSP_LOOP(a)  psp_trace_loop(a)\n"
+        "#  define PSP_SP_ENTER()  uint32_t _sp0 = r_sp\n"
+        "#  define PSP_SP_CHECK(a) psp_trace_sp(a, _sp0, r_sp)\n"
         "#  define PSP_MARK(a)  psp_trace_mark(a)\n"
         "#else\n"
         "#  define PSP_ENTER(a) ((void)0)\n"
         "#  define PSP_LOOP(a)  ((void)0)\n"
+        "#  define PSP_SP_ENTER()  ((void)0)\n"
+        "#  define PSP_SP_CHECK(a) ((void)0)\n"
         "#  define PSP_MARK(a)  ((void)0)\n"
         "#endif\n"
         "\n"

@@ -272,3 +272,35 @@ int psp_trace_was_marked(uint32_t addr) {
     if (!g_marked || addr < g_marked_lo || addr - g_marked_lo >= g_marked_n * 4) return -1;
     return g_marked[(addr - g_marked_lo) >> 2];
 }
+
+/* Stack-balance violations.
+ *
+ * A recompiled function must leave $sp as it found it. One that does not
+ * corrupts every callee-saved register its caller restores afterwards: the
+ * restores read `sp + offset`, so a shifted $sp reads a neighbouring slot and
+ * loads a plausible wrong value instead of failing. That is invisible until
+ * the wrong value is dereferenced, far from the cause.
+ *
+ * Checking the invariant at every return finds the culprit directly. */
+static uint64_t g_sp_bad;
+static uint32_t g_sp_first;
+static int32_t  g_sp_delta;
+
+void psp_trace_sp(uint32_t fn, uint32_t sp_in, uint32_t sp_out) {
+    if (sp_in == sp_out) return;
+    /* Print them all. A *positive* delta usually means a split continuation
+     * that contains an epilogue but not its matching prologue -- discovery
+     * makes those separate bodies, so the invariant does not hold for them and
+     * they are noise. A *negative* delta is the dangerous case: stack consumed
+     * and never returned. */
+    if (g_sp_bad < 24)
+        fprintf(stderr, "sp UNBALANCED in 0x%08X: %+d%s\n", fn,
+                (int)(sp_out - sp_in),
+                (int32_t)(sp_out - sp_in) < 0 ? "   <-- leak" : "");
+    if (!g_sp_bad) { g_sp_first = fn; g_sp_delta = (int32_t)(sp_out - sp_in); }
+    g_sp_bad++;
+}
+
+uint64_t psp_sp_violations(void) { return g_sp_bad; }
+uint32_t psp_sp_first_bad(void)  { return g_sp_first; }
+int32_t  psp_sp_first_delta(void){ return g_sp_delta; }
