@@ -304,3 +304,16 @@ void psp_trace_sp(uint32_t fn, uint32_t sp_in, uint32_t sp_out) {
 uint64_t psp_sp_violations(void) { return g_sp_bad; }
 uint32_t psp_sp_first_bad(void)  { return g_sp_first; }
 int32_t  psp_sp_first_delta(void){ return g_sp_delta; }
+
+/* Stack imbalance observed across a call. Complements psp_trace_sp: that one
+ * checks a body against its own entry and is blind to leaks that straddle a
+ * body boundary; this one names the callee directly. */
+static uint64_t g_spc_bad;
+void psp_trace_sp_call(uint32_t callee, uint32_t sp_before, uint32_t sp_after) {
+    if (sp_before == sp_after) return;
+    if (g_spc_bad < 16)
+        fprintf(stderr, "sp NOT RESTORED by callee 0x%08X: %+d\n",
+                callee, (int)(sp_after - sp_before));
+    g_spc_bad++;
+}
+uint64_t psp_sp_call_violations(void) { return g_spc_bad; }

@@ -4006,3 +4006,53 @@ That is a real piece of work rather than a one-line filter, and it is the
 correct next step: the -48 is measured twice by independent means, the epilogue
 that reports it is provably faithful, and the only place left for the fault to
 be is the boundary the instrument currently ignores.
+
+---
+
+# The leak, isolated: two functions, and the arithmetic proves it
+
+Checking `$sp` **across every call** rather than within each body -- 10,112
+sites -- names the callees directly, and is blind to neither split bodies nor
+tail jumps:
+
+```
+sp NOT RESTORED by callee 0x0000E4DC: -32   <- root
+sp NOT RESTORED by callee 0x0000D410: -16   <- root
+sp NOT RESTORED by callee 0x0000E0AC: -48   = -32 + -16, inherited
+sp NOT RESTORED by callee 0x0000E06C: -48   inherited
+```
+
+**The deltas decompose exactly.** `0x0000E0AC` calls both roots and inherits
+their sum; `0x0000E06C` calls `0x0000E0AC` and inherits it in turn. That
+arithmetic is the confirmation -- an inherited figure that happens to equal the
+sum of its two children is not coincidence.
+
+And -48 is the same number measured independently at the very start of this
+trail, between two allocator calls, by reading `$sp` at two addresses.
+**Three methods, one answer.**
+
+## The two roots
+
+- `0x0000E4DC` opens with `addiu $sp, $sp, -32` and never returns it.
+- `0x0000D410` opens with `addiu $sp, $sp, -16` and never returns it.
+
+Both have correct epilogues in their emitted code -- verified by reading them.
+So on the path actually taken, neither reaches its epilogue: each exits through
+a tail jump into a continuation body, and that continuation does not restore
+the frame its caller opened.
+
+That is the defect, and it is structural rather than incidental: **when
+discovery splits a function, the prologue and epilogue can land in different
+bodies, and a path that leaves through the split never runs the half it
+needs.** It explains every stack-derived symptom in this document -- garbage
+pointers, unconstructed objects, null vtables, self-looping lists -- because
+every callee-saved restore reads `sp + offset` and a shifted `$sp` reads a
+neighbouring slot.
+
+## Next
+
+Fix the split, not the symptom. Either keep prologue and epilogue in one body,
+or make a tail jump between bodies carry the frame correctly. The call-site
+checker (`PSP_SP_CALL`) stays as a regression guard: it found this in one run
+after the per-body check could not see it, and it will catch any recurrence
+immediately.

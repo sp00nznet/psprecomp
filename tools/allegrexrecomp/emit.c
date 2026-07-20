@@ -97,7 +97,14 @@ static void emit_static_call(ectx *c, uint32_t target) {
     if (is_import(c->an, target)) {
         fprintf(c->out, "    psp_import_%08X();\n", target);
     } else if (is_function(c->an, target)) {
-        fprintf(c->out, "    psp_func_%08X();\n", target);
+        /* Check the stack across the call. A callee that consumes stack and
+         * does not return it corrupts every callee-saved register its caller
+         * restores afterwards, and the corruption surfaces far away. Checking
+         * at the call site catches it wherever the imbalance actually occurs --
+         * including across split bodies, where no single body owns both halves
+         * of a frame and a per-body check is blind. */
+        fprintf(c->out, "    { uint32_t _spc = r_sp; psp_func_%08X();"
+                        " PSP_SP_CALL(0x%08Xu, _spc, r_sp); }\n", target, target);
     } else {
         /* Discovery did not reach it. Going through the dispatch table means
          * the failure is named at run time instead of failing to link. */
@@ -810,12 +817,14 @@ static void emit_header(FILE *f, const a_analysis *an, const emit_opts *o) {
         "#  define PSP_LOOP(a)  psp_trace_loop(a)\n"
         "#  define PSP_SP_ENTER()  uint32_t _sp0 = r_sp\n"
         "#  define PSP_SP_CHECK(a) psp_trace_sp(a, _sp0, r_sp)\n"
+        "#  define PSP_SP_CALL(t,a,b) psp_trace_sp_call(t, a, b)\n"
         "#  define PSP_MARK(a)  psp_trace_mark(a)\n"
         "#else\n"
         "#  define PSP_ENTER(a) ((void)0)\n"
         "#  define PSP_LOOP(a)  ((void)0)\n"
         "#  define PSP_SP_ENTER()  ((void)0)\n"
         "#  define PSP_SP_CHECK(a) ((void)0)\n"
+        "#  define PSP_SP_CALL(t,a,b) ((void)0)\n"
         "#  define PSP_MARK(a)  ((void)0)\n"
         "#endif\n"
         "\n"
