@@ -829,3 +829,48 @@ Read `0x00066C6C`'s function from its entry, not from the loop: find where
 `$a0` is established before the two constructor calls. Whoever produces that
 pointer either allocates the object and should install the vtable, or hands
 over one that was never constructed.
+
+## The layout, and why the objects are expected pre-built
+
+```
+00066C34  addiu $sp, $sp, -16          ; function entry
+00066C48  sw    $zero, 31960($a0)
+00066C4C  jal   0x000681C8             ; writes a0+31964, a0+31976
+00066C6C  lw    $t9, 12($s1)           ; loop body
+00066C84  bne   $v1, $zero, 0x00066C6C
+00066C88  addiu $s1, $s1, 1880         ; stride
+```
+
+Seventeen objects, **1880 bytes** apart. 17 x 1880 = **31960** -- exactly the
+offset this function starts zeroing at. So `$a0` points at an array of 17
+sub-objects followed by the parent's own fields, and this function initialises
+only the trailing fields before calling method 3 on each element.
+
+The elements are therefore expected to be **already constructed** when this
+runs. Their `+12` pointers are zero, so they are not.
+
+Its two callers are `0x000743F0` and `0x0007EAE8`; neither appears in the
+retained trace (which holds only 32 entries, so this is not yet conclusive).
+
+## Miss 18 is a different failure and may be the more informative one
+
+```
+miss 18: target=0x003C61D8 from fn 0x0007EB24
+```
+
+`0x003C61D8` is past `filesz` (`0x3B4000`), so it is a **`.bss` data address
+being called as code** -- not a null pointer, a *wrong* one. And `0x0007EB24`
+sits immediately after `0x0007EAE8`, one of the two callers above.
+
+A null pointer means "never written". A plausible-but-wrong pointer means
+something *was* written, from the wrong place or with the wrong value. That is
+a much narrower fault, and it is in the same region as the code that should be
+constructing these objects.
+
+## Next
+
+1. Read `0x0007EAE8` and `0x0007EB24` together -- one calls `0x00066C34`, the
+   other produces a bad function pointer. That pairing is the strongest
+   remaining lead.
+2. Confirm whether `0x000743F0` or `0x0007EAE8` actually executes, by watching
+   both rather than inferring from a 32-entry trace.
