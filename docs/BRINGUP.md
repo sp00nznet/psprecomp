@@ -2934,3 +2934,50 @@ exhaustion -- is now ruled out by measurement rather than argument.
 for a round. The check that caught it was reading the callee''s prologue to see
 which register it actually consumes. Plausible output is not verification --
 this document now contains four separate instances of the same error.
+
+## None of the eight constructors touches the array
+
+Snapshotting `0x00415B68` around each constructor:
+
+```
+ctor 0x003B2AF8: array untouched
+ctor 0x003B2B40: array untouched
+ctor 0x003B2B7C: array untouched
+ctor 0x003B2DF0: array untouched
+ctor 0x003B2E94: array untouched
+ctor 0x003B2F38: array untouched
+ctor 0x003B2F88: array untouched
+ctor 0x003B2FCC: array untouched
+```
+
+So it is **not** a static array with a missing constructor either. That was the
+last standing hypothesis, and it is dead.
+
+## What that forces
+
+Nothing allocates 31,960 bytes, nothing writes the array base, and no
+constructor claims it. The remaining possibility is that **`0x00415B68` is not
+a real object address at all** -- that `$a0` reaching `0x00066C34` is wrong, and
+the seventeen-element loop is striding across unallocated `.bss`.
+
+That fits the evidence better than any construction theory:
+
+- The five allocations are 32 bytes each. If the object handed to
+  `0x00066C34` is one of them, a loop striding 1880 bytes seventeen times walks
+  ~32 KB past a 32-byte allocation -- straight into untouched `.bss`, which is
+  exactly what records 2..17 look like.
+- Record 1 alone is correctly built, because record 1 *is* the real object.
+- Records 3+ read file data or zeros depending on where the stride lands.
+
+## The next measurement, and a caution
+
+Watch `0x00066C34` on entry and print `$a0`, then compare it against the return
+value of the 32-byte allocation at `0x000743F0`. If they match, the loop bound
+of seventeen is being applied to a single object and the fault is upstream in
+whatever supplies the count.
+
+The caution: this document has recorded a confident "the pointer is wrong"
+conclusion once before and withdrawn it, because the pointer was fine and the
+measurement was reading a stale register at a non-entry address. `0x00066C34`
+is a real function entry, so a watch there is observable -- but check
+`psp_body_00066C34` exists before trusting a negative.
