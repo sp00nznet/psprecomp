@@ -1342,3 +1342,42 @@ it printed `$k0`.
    non-null and `0x00074400` should fall through rather than branch.
 3. Expect further gaps once allocation works -- but every stall recorded here
    is downstream of this one register.
+
+## Measured: the allocation really does return null
+
+Rather than assume the error path was taken, watched its counterpart:
+
+```
+0x0007443C never ran  ->  the 32-byte allocation returned NULL
+```
+
+`0x0007443C` is the target of `bnel $s4, $zero` -- the success path. It never
+executes, so `$s4` is zero and allocation genuinely fails. The chain in the
+previous section is confirmed at its most important link.
+
+## Setting $k0 alone is not sufficient
+
+Installing a thread control block (`$k0 = TCB`, `*(TCB+4) = reent`, reent
+zeroed) does **not** make allocation succeed. Still null.
+
+So the diagnosis needs refining: a zeroed `reent` is not a usable one. Newlib
+keeps its heap state inside that structure, and an all-zero heap has no memory
+to hand out -- the pointer chain is now valid but empty. Whatever normally
+fills it (a heap-initialising call at start-up, or an `sbrk` that obtains
+memory from the kernel) is the missing piece, not the register itself.
+
+`$k0` being unset is still real and still wrong -- it is why `_getmodreent`
+takes its fallback -- but it is one of at least two things standing between
+here and a working allocator.
+
+## Next
+
+1. Read `0x0000E0AC`, the allocator proper (called with the reent in `$a0` and
+   the size in `$a1`). It will show which reent fields it consults and what it
+   does when they are empty -- most likely a call to `sbrk`.
+2. Find that `sbrk` and see where it expects memory to come from. If it is a
+   `sceKernelAllocPartitionMemory` call, the HLE already implements that and
+   the gap is small; if it expects a pre-set heap range, the host must
+   establish one.
+3. Do not assume the reent layout. Read the offsets `0x0000E0AC` actually
+   touches, the way `$t2 = 1` should have been read rather than assumed.
