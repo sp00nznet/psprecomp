@@ -459,3 +459,51 @@ involved.
 - The stall is a loop containing **no calls of any kind** -- not dispatch (38
   indirect calls total), not firmware (first-call logs only).
 - It is above `0x0004DD14` in the call chain, which returns normally.
+
+---
+
+# $ra holds a stack address
+
+Dumping registers from the watchdog -- the loop calls nothing, so the entry
+trace cannot see into it, but the register file is still readable:
+
+```
+regs at stall: ra=0x09FFFBB0 sp=0x09FFFAB0 gp=0x003BC870
+  v0=0x00000000 v1=0x00000001 a0=0x003EC384 a1=0x09FFFAE8
+  s0=0x003EC37C s1=0x00000000 s2=0x09FFFAE8 s3=0x003EC384
+```
+
+**`$ra` is `0x09FFFBB0` -- inside the stack, 256 bytes above `$sp`.** A return
+address must live in the module's code range (`0x00000000`-`0x004B0000`).
+Whatever is in `$ra` was never a return address; it is a stack pointer that got
+stored there.
+
+That is worth more than any of the loop theories. A clobbered `$ra` means
+`jr $ra` jumps somewhere arbitrary, and it plausibly explains the **17 null
+dispatches** already logged: a register file that loses return addresses
+produces exactly that.
+
+## What it also says about the register state
+
+`a0 = s3 = 0x003EC384` and `s2 = a1` match the prologue of `0x0004DBB0`, which
+does `s3 = a0; s2 = a1; s1 = a2`. But `s1 = 0` (it should hold `a2`) and
+`s0 = 0x003EC37C` -- a *pointer*, `a0 - 8` -- where `0x0004DBB0` sets `s0 = 0`
+and uses it as a loop counter bounded at 1026.
+
+So the callee-saved registers are half-consistent with that frame and half not.
+Either the stall is in a different function that happens to share argument
+values, or **saved registers are not being restored correctly across calls**.
+The second would explain `$ra` too, and it is the more economical explanation.
+
+## Next
+
+1. Check `sw $ra, N($sp)` / `lw $ra, N($sp)` emission against a function that
+   nests calls. If the store and load disagree about the offset, or the stack
+   adjustment is applied in the wrong order relative to the save, every
+   non-leaf function corrupts its own return address.
+2. `$sp` at the stall is `0x09FFFAB0`, but the host sets `HOST_STACK` to
+   `0x08F00000` -- the game moved its own stack. Confirm that region is mapped
+   and large enough; a stack growing into unmapped memory would produce
+   silently-lost saves and exactly this register state.
+3. Only then revisit the loop. The loop is a symptom if the register file is
+   already wrong.
