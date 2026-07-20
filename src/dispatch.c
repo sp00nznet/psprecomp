@@ -183,7 +183,20 @@ void psp_dispatch(uint32_t addr) {
         if (g_over) g_over();
     }
     psp_fn_t fn = psp_lookup(addr);
-    if (fn) { fn(); return; }
+    if (fn) {
+        /* Log the first few *successful* indirect calls. Every session so far
+         * has examined only the failures; a working virtual call sitting next
+         * to a broken one says where vptrs come from. */
+        extern int psp_log_indirect;
+        static int logged;
+        if (psp_log_indirect && logged < 12) {
+            logged++;
+            fprintf(stderr, "indirect ok: target=0x%08X from fn 0x%08X\n",
+                    addr, psp_trace_last());
+        }
+        fn();
+        return;
+    }
 
     g_misses++;
     /* Aborting by default is deliberate. A silently-ignored indirect call
@@ -217,3 +230,6 @@ static uint64_t g_loop_hits;
 void psp_trace_loop(uint32_t addr) { g_loop_addr = addr; g_loop_hits++; }
 uint32_t psp_trace_loop_addr(void) { return g_loop_addr; }
 uint64_t psp_trace_loop_hits(void) { return g_loop_hits; }
+
+int psp_log_indirect;
+

@@ -925,3 +925,52 @@ Find a *working* virtual call -- there must be many, since execution reaches
 this far -- and compare its object's vptr against these. One correct example
 next to two broken ones will say whether vptrs are written by constructors, by
 a registration pass, or by the loader, and that determines where to look.
+
+## How a working vptr is installed
+
+Logging *successful* indirect calls (never done before -- only failures were
+ever examined) gave a working example immediately, in the same code region as
+the broken one:
+
+```
+indirect ok: target=0x0004BE0C from fn 0x000740A4
+```
+
+And `0x000740A4` is a constructor that installs its vptr in three instructions:
+
+```
+000740A4  addiu $sp, $sp, -16
+000740AC  lui   $v0, 0x3B
+000740B4  addiu $v0, $v0, 12316     ; v0 = 0x003B301C
+000740B8  sw    $v0, 0($a0)         ; object->vptr = 0x003B301C
+```
+
+Two things follow, and both are load-bearing:
+
+1. **vptrs live at object offset 0**, written by the object's own constructor.
+2. The value is a **file-image address**: `0x003B301C` is below `filesz`
+   (`0x3B4000`), so the vtable is real read-only data, not `.bss`. It is
+   materialised by `lui`/`addiu` as an absolute constant -- no relocation, no
+   loader involvement. That independently confirms relocations are not the
+   fault here.
+
+## What the broken cases now mean
+
+The seventeen sub-objects have never had their constructors run. Each would do
+its own `sw <vtable>, 0($a0)`; none did, so their vptr words are still the zero
+that `.bss` started as.
+
+The parent constructor at `0x00066C34` zeroes trailing fields and then
+immediately calls method 3 on all seventeen -- so it assumes something else
+already constructed them. Nothing in `0x0007EAE8` -> `0x00066C34` does.
+
+## Next
+
+Look for the missing pass: a loop that walks the same 17 x 1880 array calling a
+constructor on each element. It exists somewhere -- the parent would not
+dispatch to them otherwise. Either it is never reached, or it runs against a
+different address.
+
+The `lui`/`addiu`/`sw ..., 0($a0)` signature is distinctive enough to grep the
+disassembly for directly, which is a far better search than following call
+chains by hand.
