@@ -52,6 +52,11 @@ typedef struct {
 
 const psp_hle_entry *psp_hle_entries(int *count);
 
+/* Print the recent firmware calls that returned zero. Zero is what a game most
+ * often mistakes for an address, so this is the first thing to consult when a
+ * wild pointer shows up far from its cause. */
+void psp_hle_dump_recent(FILE *out);
+
 /* Register everything the toolkit implements. Call once at startup. */
 void psp_hle_init(void);
 

@@ -1,6 +1,7 @@
 /* psprecomp — HLE dispatch. See include/psprecomp/hle.h. */
 
 #include "psprecomp/hle.h"
+#include "psprecomp/dispatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,10 +40,57 @@ const psp_hle_entry *psp_hle_entries(int *count) {
     return g_entry;
 }
 
+/* A short history of firmware calls that returned zero.
+ *
+ * Zero is the value a game most often treats as an address, so a stubbed or
+ * failing call returning it tends to surface far away as a wild pointer --
+ * typically a table walk starting near address 0. When that happens the useful
+ * question is "which call handed the game a null?", and by then the call is
+ * long gone. Keeping the last few makes the answer immediate instead of
+ * requiring a second run with different instrumentation. */
+#define ZERO_HISTORY 16
+static struct { uint32_t nid; const char *name; } g_zero[ZERO_HISTORY];
+static int g_zero_n;
+
+static void note_zero(uint32_t nid, const char *name) {
+    g_zero[g_zero_n % ZERO_HISTORY].nid = nid;
+    g_zero[g_zero_n % ZERO_HISTORY].name = name;
+    g_zero_n++;
+}
+
+void psp_hle_dump_recent(FILE *out) {
+    if (!g_zero_n) {
+        fprintf(out, "  (no firmware call returned zero)\n");
+        return;
+    }
+    int n = g_zero_n < ZERO_HISTORY ? g_zero_n : ZERO_HISTORY;
+    /* Read this list with care: SCE_KERNEL_ERROR_OK is also zero, so a
+     * successful call that returns nothing appears here exactly like a
+     * handle-returning call that failed. The entries worth suspecting are the
+     * ones whose name implies an address or an id -- GetBlockHeadAddr,
+     * GetModuleId, the Create/Alloc family. The rest are noise.
+     *
+     * That ambiguity is a limitation of this instrument, not of the runtime:
+     * distinguishing the two needs per-function knowledge of what the return
+     * value means, which the table does not currently carry. */
+    fprintf(out, "  last %d firmware calls that returned zero, newest first\n"
+                 "  (note: success is also zero -- see the comment in hle.c):\n", n);
+    for (int i = 1; i <= n; i++) {
+        int k = (g_zero_n - i) % ZERO_HISTORY;
+        fprintf(out, "    0x%08X  %s\n", g_zero[k].nid,
+                g_zero[k].name ? g_zero[k].name : "(unimplemented)");
+    }
+}
+
 void psp_hle_call(uint32_t nid) {
     for (int i = 0; i < g_count; i++) {
-        if (g_entry[i].nid == nid) { g_fn[i](); return; }
+        if (g_entry[i].nid == nid) {
+            g_fn[i]();
+            if (psp_cpu.r[PSP_REG_V0] == 0) note_zero(nid, g_entry[i].name);
+            return;
+        }
     }
+    note_zero(nid, NULL);
 
     /* Unimplemented. Naming the function is the whole point — bringing a game
      * up is largely the process of watching this message stop appearing, and
@@ -68,7 +116,10 @@ const char *psp_str(uint32_t addr, char *dst, size_t cap) {
     return dst;
 }
 
+static void miss_context(void) { psp_hle_dump_recent(stderr); }
+
 void psp_hle_init(void) {
+    psp_set_miss_context(miss_context);
     psp_sysmem_init();
     psp_sysmem_register();
     psp_threadman_init();

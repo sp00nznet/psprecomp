@@ -22,6 +22,10 @@ static uint32_t g_cap;      /* always a power of two */
 static uint32_t g_count;
 static uint64_t g_misses;
 static psp_miss_fn_t g_miss;
+static psp_miss_ctx_fn_t g_miss_ctx;
+
+void psp_set_miss_context(psp_miss_ctx_fn_t fn) { g_miss_ctx = fn; }
+void psp_miss_context(void) { if (g_miss_ctx) g_miss_ctx(); }
 
 static uint32_t hash_addr(uint32_t a) {
     /* Knuth multiplicative. The low two bits are always zero, so shift them
@@ -79,6 +83,7 @@ static void default_miss(uint32_t addr) {
             "function.\n"
             "  Either discovery missed it, or it is data being called as code.\n",
             addr);
+    psp_miss_context();
     abort();
 }
 

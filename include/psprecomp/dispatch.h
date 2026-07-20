@@ -37,6 +37,14 @@ void psp_dispatch(uint32_t addr);
 /* Called when psp_dispatch hits an unregistered address. The default prints
  * the address and aborts; a host can override it to log and continue, which is
  * useful while discovery is still incomplete. */
+/* Optional hook that prints extra context when a dispatch miss happens. The
+ * HLE layer installs one so a wild pointer is reported alongside the firmware
+ * calls that recently returned zero -- dispatch itself must not depend on the
+ * HLE layer, hence the indirection. */
+typedef void (*psp_miss_ctx_fn_t)(void);
+void psp_set_miss_context(psp_miss_ctx_fn_t fn);
+void psp_miss_context(void);
+
 typedef void (*psp_miss_fn_t)(uint32_t addr);
 void psp_set_miss_handler(psp_miss_fn_t fn);
 
