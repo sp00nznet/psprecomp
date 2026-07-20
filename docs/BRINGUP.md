@@ -3698,3 +3698,43 @@ through the original''s `lw $s1, 4($sp)`. The ones that do not are the bug. If
 they correspond to edges discovery missed -- `0x0000E588` among them -- then
 the fix is in discovery, not in emission, and the every-label-dispatchable
 guarantee needs extending to cover computed targets that were never labelled.
+
+### The "no restore" count was a measurement artefact
+
+Classifying each `return` by scanning six lines above it gave six exits with no
+`$s1` restore. Reading one of them shows why that is worthless:
+
+```
+    /* 0000E1FC  lw    $s0, 0($sp) */
+    r_s0 = psp_read32(r_sp + 0);
+    /* 0000E204  jr    $ra */
+    r_sp = r_sp + 32;
+    return;
+```
+
+The emission is a **faithful translation** of the original epilogue -- and the
+original restores `$s0` there, not `$s1`, because `$s1` was restored earlier on
+that path, outside a six-line window. A fixed-size context window cannot
+classify epilogues that span more instructions than the window.
+
+So "8 returns, 2 restores" says nothing, and the conclusion drawn from it is
+withdrawn. This is the fifth time in this document a crude measurement produced
+a confident wrong reading; the pattern is consistent enough to state as a rule:
+**a measurement whose window or resolution is chosen for convenience will
+manufacture whatever conclusion that choice implies.**
+
+### What still stands, measured directly
+
+`$s1` is `0x003FD060` at `0x000743A0` and `0x0000E124` at `0x00074440`, with a
+call to `0x0000E06C` between them. That comparison is two register reads at two
+addresses and does not depend on any window. **The clobber is real.**
+
+What is not established is where inside the call it happens.
+
+### To settle it properly
+
+Watch `$s1` at entry and exit of `0x0000E06C` itself, then at entry and exit of
+each function it calls, narrowing until the clobbering callee is identified by
+measurement rather than by reading emitted code. That is the same
+bisect-by-measurement that found the constructor-tier boundary in one pass
+after inference had failed for several rounds.
