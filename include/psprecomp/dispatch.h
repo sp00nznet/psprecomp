@@ -26,6 +26,8 @@ typedef void (*psp_fn_t)(void);
  * function it defines, from a single init routine. */
 void psp_register(uint32_t addr, psp_fn_t fn);
 void psp_register_label(uint32_t addr, psp_fn_t fn);
+void psp_dispatch_set_budget(uint64_t calls, void (*on_exceeded)(void));
+uint64_t psp_dispatch_calls(void);
 
 /* Look up a target. Returns NULL if nothing is registered there. */
 psp_fn_t psp_lookup(uint32_t addr);

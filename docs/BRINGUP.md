@@ -183,3 +183,92 @@ plausible theory that would otherwise have absorbed real effort. The two
 findings that *did* land â€” the encrypted-module key tag offset, and the
 identification of these garbage values â€” both came from searching the binary
 for a pattern rather than reasoning about what should be happening.
+
+---
+
+# The GE draws, and the game reaches it
+
+## Where it stands
+
+The game now submits display lists: **3 lists, 254 commands, 2 finishes**, and
+sets a framebuffer at `0x04088000`. That is the first time anything has reached
+the GPU. It gets there through libc startup, `sceCtrl` input setup, and into
+what is almost certainly the render path.
+
+It still does not draw. `vertices submitted: 0`, `vtype 0x000000` — the lists
+seen so far are state setup, not geometry. 240 of the 254 commands are not
+individually decoded, so some of that setup is being ignored rather than
+applied.
+
+## Every label is now dispatchable
+
+A recompiled function has one C entry point. The original has as many as
+something can jump to. Direct branches become `goto`, and discovery promotes
+cross-function branches — but a **computed** jump resolves at runtime, and its
+target is routinely a block in the middle of a function that discovery had no
+static reason to make callable. Dispatch then missed on `0x0000E594`: an
+address whose code was sitting right there in the generated file, under a label
+nothing could reach.
+
+Each function now takes an entry address and begins with a switch; each
+interior label gets a thunk. 5849 functions, 7833 interior entries, 13682
+dispatch entries. Jump tables, indirect calls and cross-function branches
+resolve by construction.
+
+This was the **fourth** bug in one family — a boundary change applied to
+emission but not to reachability. The others: entry address, cross-function
+targets, fall-through. Each was invisible in whatever metric was being watched
+at the time. Making reachability total is what ends the pattern; the first
+three were each fixed one crash at a time.
+
+## Two ways to see a hang, because one was not enough
+
+The host had no budget, so every run had to be killed on a timer and every
+statistic was lost with it. Two mechanisms now:
+
+- **A call budget** in `psp_dispatch`. Useful, but far narrower than it looks:
+  direct calls compile to direct C calls, so it only counts *indirect* ones. A
+  20-second run registered **38**.
+- **A wall-clock watchdog** in the host. This is the one that works. It does not
+  care about the shape of the loop, and a spin-wait compiled entirely into
+  `goto`s inside a single function — exactly what bring-up gets stuck in — is
+  invisible to any counter placed at a call boundary.
+
+Note also that MSVC treats `_IOLBF` as full buffering. A killed run lost all of
+its stdout, which is what made the first hang look like an instant silent crash.
+
+## Where it hangs, and the standing hypothesis
+
+Last function entered is `0x00046830`, but that and its neighbours are short
+leaf helpers that return promptly — the loop is in a caller and contains **no
+calls at all**: not dispatch (38 indirect calls total), not firmware (101
+stderr lines, all first-call logs — only 11 `sceKernelGetGPI`).
+
+A pure compute loop that never exits. Immediately before it:
+
+```
+unimplemented at 0x0002F898: vfpu?
+unimplemented at 0x0002F89C: vcst
+unimplemented at 0x0002F8A0: vcst
+unimplemented at 0x0002F8B0: vidt
+```
+
+**Hypothesis: the unimplemented VFPU ops leave registers holding garbage, and a
+loop that iterates until a value converges never converges.** `vcst` loads a
+constant and `vidt` builds an identity vector — both matrix setup, both on the
+render path, and both trapping to no-ops right now. A loop fed zeros or stale
+values where it expects a unit basis is a good way to spin forever.
+
+This is a hypothesis, not a finding. It is cheap to test: implement `vcst` and
+`vidt`, identify the `vfpu?` at `0x0002F898`, and re-run. If the loop still
+spins, the theory is dead and the next step is to find the loop head by address
+rather than by trace.
+
+## Next
+
+1. Implement `vcst` / `vidt`; identify the unknown op at `0x0002F898`.
+2. Decode the 240 unrecognised GE commands — some are certainly the vertex and
+   texture state that would make `vtype` non-zero.
+3. Transformed geometry. The rasterizer currently handles through-mode only and
+   *counts* transformed vertices rather than drawing them, deliberately: wrong
+   pixels are harder to diagnose than no pixels.

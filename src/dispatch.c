@@ -139,7 +139,31 @@ static void default_miss(uint32_t addr) {
 
 void psp_set_miss_handler(psp_miss_fn_t fn) { g_miss = fn; }
 
+/* A budget on dispatched calls.
+ *
+ * A game's main loop does not return, and during bring-up it is just as likely
+ * to be spinning on a condition nothing will ever satisfy. Both look identical
+ * from outside: the process sits there. Killing it from the shell loses every
+ * statistic that would say which one it is.
+ *
+ * With a budget the run ends on its own and the host prints its report, so a
+ * hang becomes readable evidence instead of a stopped terminal. */
+static uint64_t g_calls, g_budget;
+static void (*g_over)(void);
+
+void psp_dispatch_set_budget(uint64_t calls, void (*on_exceeded)(void)) {
+    g_budget = calls;
+    g_over = on_exceeded;
+    g_calls = 0;
+}
+
+uint64_t psp_dispatch_calls(void) { return g_calls; }
+
 void psp_dispatch(uint32_t addr) {
+    if (g_budget && ++g_calls >= g_budget) {
+        g_budget = 0;                 /* fire once */
+        if (g_over) g_over();
+    }
     psp_fn_t fn = psp_lookup(addr);
     if (fn) { fn(); return; }
 
