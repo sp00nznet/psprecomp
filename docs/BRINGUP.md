@@ -3221,3 +3221,37 @@ silently -- which is what every measurement downstream has been reporting.
 
 This is the first actionable item in the chain that is a *missing feature*
 rather than a bug -- and it is one function.
+
+## The NID test refused a fabricated name — correctly
+
+Registering `0xF9275D98` under the placeholder name
+`"ModuleMgrForUser_F9275D98"` so it could return a module id instead of zero
+**failed the HLE test suite immediately**.
+
+That is the self-verifying NID property doing its job: every registered entry is
+checked against the SHA-1 of its own declared name, so a made-up name cannot be
+registered. The change was reverted rather than the test weakened.
+
+It is worth being explicit about why that matters here. The temptation was to
+get past a blocker by claiming a name the function does not have -- and the
+resulting table would have run, looked fine, and lied about what it implements.
+A "plausible lie that turns into a silent failure later" is the exact phrase
+already recorded in this document about a different fabricated value, and the
+test exists because of it.
+
+Eighteen candidate `ModuleMgr` names have now been tried against SHA-1 with no
+match, and the method is verified -- `sceKernelStopModule` reproduces
+`0xD1FF982A` exactly. So `0xF9275D98` is a real firmware entry point whose name
+is simply not among the obvious guesses.
+
+### The correct way to unblock this
+
+Either identify the name (a larger dictionary of PSP firmware exports, or a
+name list from a header), or add a mechanism for registering a NID whose name
+is genuinely unknown -- one that records it as unidentified rather than
+inventing a name. The second is honest and small: an explicit
+`psp_hle_register_unnamed(nid, lib, fn)` that the NID test skips by design and
+that reports "unidentified NID" in listings.
+
+That is the next change, and it is a better outcome than guessing: it makes
+"we do not know what this is" representable instead of unrepresentable.
