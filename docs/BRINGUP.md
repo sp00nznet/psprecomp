@@ -1200,3 +1200,43 @@ constructors.
    something else.
 3. Note this reframing before resuming: four sections above were written on the
    assumption that construction was broken. That assumption is now unsupported.
+
+## The boundary, and a garbage argument
+
+```
+0x000743F0: RAN   a0=0x6A5DE983  s0=0x003FD160
+0x0007EAE8: never ran
+```
+
+`0x00066C34` has exactly two callers. One never runs; the other **does** -- so
+the path into the failing dispatcher is `0x000743F0`, and this is the
+"runs / never runs" boundary the walk was looking for.
+
+And `$a0` on entry is **`0x6A5DE983`**, which is not a pointer to anything. The
+module occupies `0x00000000`-`0x004B0000` and RAM starts at `0x08000000`; that
+value is in neither. It has the look of a hash or an uninitialised word rather
+than an address.
+
+So `0x000743F0` is entered with a garbage object pointer. Everything downstream
+follows from that: it derives the array base from `$a0`, hands it to
+`0x00066C34`, and the dispatcher then reads vptrs out of memory that was never
+an object.
+
+## What this displaces
+
+The previous section's reframing -- "a consumer is running too early" -- is
+half right and half wrong. The consumer is running at the *right* time, on the
+*wrong* data. The seventeen constructors were never going to run for this
+object because this object is not real.
+
+That also explains the mixed vptr evidence cleanly: `0` where the garbage
+pointer happened to land in zeroed `.bss`, and `0x003C61D8` where it landed
+somewhere with data in it. Two different symptoms, one bad pointer.
+
+## Next
+
+Find `0x000743F0`'s caller and what it passes. `$a0 = 0x6A5DE983` is a specific
+value -- search for where it is produced. A wrong return value from an HLE
+call, a read through an uninitialised pointer, or a register clobbered across a
+call would each produce it, and they are distinguishable by watching the
+caller's `$a0` immediately before the call.
