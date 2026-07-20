@@ -3184,3 +3184,40 @@ Every earlier statement about this call rested on the absence of a log line.
 Absence of evidence from a mechanism that *cannot* produce evidence is not
 evidence, and that pattern has now cost this investigation four separate wrong
 conclusions. Making import stubs traceable removes the blind spot permanently.
+
+## One unimplemented firmware call, and it is on the heap path
+
+With import stubs traceable and a clean rebuild:
+
+```
+psprecomp: unimplemented firmware call 0xF9275D98   (x3)
+```
+
+**That is the only unimplemented NID in the entire run**, and it is called
+exactly three times -- the same count as the three heap-grow requests.
+
+```
+ModuleMgrForUser :: NID 0xF9275D98
+void psp_import_00091EEC(void) { PSP_ENTER(0x00091EECu); psp_hle_call(0xF9275D98u); }
+```
+
+It is a `ModuleMgrForUser` function and does not match the SHA-1 of any of the
+fourteen common ModuleMgr names tried, so it is a firmware-specific entry point
+whose name still needs identifying. (NID = first four bytes of SHA-1(name), so
+identification is exact once the right name is guessed -- no ambiguity.)
+
+The matching call counts are the significant part: the routine at `0x00000290`
+that establishes the heap makes three requests, and this unimplemented call
+happens three times. An HLE stub returning 0 to a module-manager query on the
+heap-setup path is exactly the shape that would make heap establishment fail
+silently -- which is what every measurement downstream has been reporting.
+
+### Next
+
+1. Identify `0xF9275D98` by brute-forcing plausible `ModuleMgr` names against
+   SHA-1; the test harness already verifies NIDs this way, so the machinery
+   exists.
+2. Implement it, re-run, and see whether the heap is established.
+
+This is the first actionable item in the chain that is a *missing feature*
+rather than a bug -- and it is one function.
