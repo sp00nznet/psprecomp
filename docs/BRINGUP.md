@@ -3594,3 +3594,33 @@ than trusting the trace.
 real caller (read the call site, do not trust the trace), and check where that
 pointer came from. The two fixes this session were both calling-convention
 faults; this has the same shape and is the natural third.
+
+### The caller, read from the call site
+
+`0x00000914` has four callers; the one on this path is `0x000743F0`, whose call
+site is unambiguous:
+
+```
+00074440  addu $a0, $s1, $zero
+00074444  addu $a1, $s4, $zero
+00074448  jal  0x00000914
+0007444C  addu $a2, $s4, $v0      ; delay slot
+```
+
+So the bad object pointer is **`$s1`**, and `$s4` is the allocation result
+captured at `0x000743FC` (`addu $s4, $v0, $zero`). `$s1` is advanced by 48 each
+time round the enclosing five-iteration loop:
+
+```
+00074450  addiu $s5, $s5, 1
+00074454  slti  $v0, $s5, 5
+00074464  addiu $s1, $s1, 48       ; delay slot
+```
+
+`$s1 = 0x0000E124` is inside `.text`, so whatever seeds it before the loop is
+wrong -- five 48-byte objects are being initialised over code. Reading where
+`$s1` is first set, before `0x000743F0`, is the next step, and the call site
+above is read rather than inferred from the trace.
+
+This is a tractable end point: one register, one loop, one function, with the
+allocation now succeeding underneath it.
