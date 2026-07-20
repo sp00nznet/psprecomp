@@ -233,3 +233,42 @@ uint64_t psp_trace_loop_hits(void) { return g_loop_hits; }
 
 int psp_log_indirect;
 
+
+/* Label-level reachability.
+ *
+ * psp_trace_watch hooks PSP_ENTER, which is emitted once per function body. A
+ * watch on any address that is not a function entry therefore never fires, and
+ * reports "not reached" for something it simply cannot observe -- a negative
+ * indistinguishable from a real one. That flaw produced a confidently wrong
+ * conclusion about an allocation failing.
+ *
+ * Marking every label closes it: any address the emitter gave a label to can
+ * now be watched, and psp_trace_watch_ok() says up front whether an address is
+ * observable at all. */
+static uint32_t g_mark_addr;
+static void (*g_mark_fn)(uint32_t);
+static uint8_t *g_marked;
+static uint32_t g_marked_lo, g_marked_n;
+
+void psp_trace_mark(uint32_t addr) {
+    if (g_marked && addr >= g_marked_lo && addr - g_marked_lo < g_marked_n * 4)
+        g_marked[(addr - g_marked_lo) >> 2] = 1;
+    if (addr == g_mark_addr && g_mark_fn) g_mark_fn(addr);
+}
+
+void psp_trace_watch_label(uint32_t addr, void (*fn)(uint32_t)) {
+    g_mark_addr = addr;
+    g_mark_fn = fn;
+}
+
+void psp_trace_marks_init(uint32_t lo, uint32_t words) {
+    free(g_marked);
+    g_marked = (uint8_t *)calloc(words ? words : 1, 1);
+    g_marked_lo = lo;
+    g_marked_n = words;
+}
+
+int psp_trace_was_marked(uint32_t addr) {
+    if (!g_marked || addr < g_marked_lo || addr - g_marked_lo >= g_marked_n * 4) return -1;
+    return g_marked[(addr - g_marked_lo) >> 2];
+}

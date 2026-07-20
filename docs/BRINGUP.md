@@ -1823,3 +1823,50 @@ Establish, on a real entry, whether allocation actually succeeds -- watch
 `0x0000E06C` (an entry) and record `$v0` when it returns, rather than inferring
 from a branch target. Then re-ask why the constructors do not run, without
 assuming memory is the reason.
+
+## Confirmed by positive measurement: the allocation succeeds
+
+The emitter now marks **all 13,682 labels** (`PSP_MARK`), so any address it
+gave a label to can be watched, not just function entries. Re-running the
+measurement that was previously unobservable:
+
+```
+0x0007443C REACHED  ->  the 32-byte allocation SUCCEEDS
+```
+
+`0x0007443C` is the success path. It executes. So the allocator works, and the
+entire chain built on "allocation returns null" is dead -- this time by a
+positive result rather than a retraction.
+
+The tooling fix earned its cost on its first use. It also means every earlier
+"never ran" verdict is now re-checkable rather than merely suspect.
+
+## Corrected state of the investigation
+
+Measured and standing:
+
+- The allocation **succeeds**; the reent is valid and populated.
+- `$k0` is unset (still wrong, still worth fixing) but is **not** why anything
+  here fails.
+- The seventeen sub-object constructors and five ancestor levels never run --
+  measured on real entries, so these stand.
+- Seventeen null vtable dispatches at `0x00066C78`.
+- The chain walk at `0x0004DD14` self-loops, ~10.27 billion iterations.
+- `sceKernelAllocPartitionMemory` is never called -- consistent, since the
+  allocator satisfies requests from an arena it already has.
+
+Dead, with evidence: allocator failure, `$k0` as root cause, a guard before
+`sbrk`, a stack-address reent, PRX relocations, VFPU garbage, lost structure
+writes, a clobbered `$s0`, "a consumer running too early".
+
+## The question, restated cleanly
+
+Memory works. The reent works. Calls return correctly now. Yet an entire
+seventeen-element construction tier never executes while the code that
+dispatches to it does.
+
+So the divergence is a **control-flow decision**, not a resource failure --
+something branches away from construction. With label marking in place this is
+directly attackable: mark-check the branches between `0x0007EAE8` (never runs)
+and `0x000743F0` (runs), and find the first point where the executed path
+leaves the path that would have constructed.

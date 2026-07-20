@@ -55,6 +55,10 @@ void psp_trace_reset(void);
 uint32_t psp_trace_last(void);
 void psp_trace_watch(uint32_t addr, void (*fn)(uint32_t));
 void psp_trace_loop(uint32_t addr);
+void psp_trace_mark(uint32_t addr);
+void psp_trace_watch_label(uint32_t addr, void (*fn)(uint32_t));
+void psp_trace_marks_init(uint32_t lo, uint32_t words);
+int psp_trace_was_marked(uint32_t addr);
 uint32_t psp_trace_loop_addr(void);
 uint64_t psp_trace_loop_hits(void);
 

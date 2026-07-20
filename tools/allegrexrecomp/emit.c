@@ -612,7 +612,7 @@ static void emit_function(ectx *c, const a_func *fn) {
         a_insn in;
         a_decode(fetch(an, a), a, &in);
 
-        if (c->is_label[i]) fprintf(f, "L_%08X:\n", a);
+        if (c->is_label[i]) fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a);
         last_terminal = in.is_return || in.is_indirect ||
                         (in.is_jump && !in.is_call);
         comment(c, &in);
@@ -796,9 +796,11 @@ static void emit_header(FILE *f, const a_analysis *an, const emit_opts *o) {
         "#ifdef PSPRECOMP_TRACE\n"
         "#  define PSP_ENTER(a) psp_trace_enter(a)\n"
         "#  define PSP_LOOP(a)  psp_trace_loop(a)\n"
+        "#  define PSP_MARK(a)  psp_trace_mark(a)\n"
         "#else\n"
         "#  define PSP_ENTER(a) ((void)0)\n"
         "#  define PSP_LOOP(a)  ((void)0)\n"
+        "#  define PSP_MARK(a)  ((void)0)\n"
         "#endif\n"
         "\n"
         "/* Register aliases, so the generated code reads like the assembly. */\n",
