@@ -3560,3 +3560,37 @@ this document that was never properly tested.
 That is the thread to pull next, and it is testable directly: watch this
 function''s entry, record `$s1`/`$s2`, then watch again at `0x000009A0` and see
 whether they changed across the intervening calls.
+
+### The object pointer is a code address
+
+```
+0x00000914 entry: a0=0x0000E124 a1=0x008400A4 a2=0x28420074 caller 0x0000F2B8
+```
+
+`0x00000914` has a proper prologue (saves `$ra`, `$s0`-`$s3`) and immediately
+zeroes `a0+0x00` through `a0+0x28`, so `$a0` is an object it is initialising.
+It receives **`0x0000E124` -- an address inside `.text`** -- and `$a2` is
+`0x28420074`, an instruction encoding.
+
+So the garbage `$s1`/`$s2` seen at `0x000009A0` are downstream: this function is
+handed a code address as its object and writes zeros over it, then reads its
+own fields back as instruction words.
+
+`$a0 = 0x0000E124` lands in the allocator''s code, which is suggestive: a
+returned pointer that is actually a code address is what a mis-read return
+value looks like. Given `psp_arg` was just found reading the wrong registers
+for firmware calls, the same class of mistake in the *recompiled* call path --
+a return value taken from the wrong place, or a caller-saved register not
+treated as clobbered -- would produce exactly this.
+
+Note `psp_trace_last()` reports the last function *entered*, which is not
+necessarily the caller. That distinction has already caused one wrong
+conclusion in this document; confirm the caller by reading the call site rather
+than trusting the trace.
+
+### Where to resume
+
+`0x00000914` is entered with a code address as its object pointer. Find its
+real caller (read the call site, do not trust the trace), and check where that
+pointer came from. The two fixes this session were both calling-convention
+faults; this has the same shape and is the natural third.
