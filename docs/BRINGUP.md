@@ -1582,3 +1582,53 @@ Watch `0x0000F27C` and read its return value. It runs, so the question is
 whether it returns null and why -- and its answer is what `0x0000E538` tests.
 That single value is now the whole remaining question, and everything recorded
 in this document hangs off it.
+
+## Correction: 0x0000F27C is a lock helper, not an arena getter
+
+```
+0000F284  jal 0x00091E9C            ; -> NID 0x092968F4 sceKernelCpuSuspendIntr
+0000F290  addu $a0, $v0, $zero      ; a0 = saved interrupt state
+0000F294  lw   $v0, -11680($a1)     ; global at 0x003BD260
+0000F298  bne  $v0, $zero, 0x0000F2A8
+0000F2A4  sw   $a0, -11676($v0)     ; stash the state at 0x003BD264
+```
+
+Disable interrupts, save the cookie, bump a depth counter at `0x003BD260`.
+This is a **recursive-lock acquire**, and calling it "the arena getter" in the
+previous section was wrong -- the name was inferred from the caller''s use of
+its return value, not from what it does.
+
+The allocator''s `beq $v0, $zero, 0x0000E99C` is therefore testing a lock
+result, not a heap pointer. Whether that is a *failure* branch at all is now
+unclear; it may simply be the uncontended path.
+
+## A concrete suspicion in the HLE
+
+`hle_CpuSuspendIntr` (`src/hle/misc.c`):
+
+```c
+static uint32_t g_intr_enabled = 1;
+static void hle_CpuSuspendIntr(void) {
+    uint32_t prev = g_intr_enabled;
+    g_intr_enabled = 0;
+    psp_ret(prev);
+}
+```
+
+The first call returns 1; **every nested call returns 0** until something
+resumes. Recursive locks suspend interrupts repeatedly, so the inner
+acquisitions all see 0. If any caller treats the returned cookie as
+"non-zero means success", nesting silently breaks it.
+
+Whether that is what happens here needs measuring, not assuming -- the last
+several sections each turned on an inferred meaning that measurement then
+overturned. Watch `0x0000F27C`, record its return value across calls, and see
+whether `0x0000E538` branches on the first call or a later one.
+
+## Next
+
+1. Log `sceKernelCpuSuspendIntr`''s return across the run. Repeated zeros with
+   no intervening resume would confirm the nesting flaw.
+2. Read `0x0000E99C` -- the branch target -- to establish whether it is a
+   failure path or ordinary control flow. The whole chain in this document
+   assumes failure, and that assumption has not been checked.
