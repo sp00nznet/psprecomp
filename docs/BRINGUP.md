@@ -3435,3 +3435,40 @@ a run that was already doomed.
 Follow execution from `0x000743F0`. One dispatch miss remains, and 23 bad
 memory accesses -- both small enough to read individually, which is how every
 real finding in this document was made.
+
+## Remaining after the calling-convention fix
+
+One dispatch miss and 23 bad accesses -- both small enough to read individually.
+
+### The miss is a discovery gap
+
+```
+miss 0: target=0x0000E588 from fn 0x0000E2A8 ra=0x0000E7D4
+```
+
+`0x0000E588` is a real instruction (`jal 0x0000F2B8`) but has **no label and no
+body** in the generated code, so the every-label-is-dispatchable guarantee does
+not cover it -- discovery never reached this block, and a computed jump lands
+there at run time.
+
+That is a genuine gap rather than an emitter bug: the block is inside the
+allocator, which discovery only partly walked. Worth checking whether the
+allocator''s jump tables are being resolved, since dlmalloc''s bin selection is
+exactly the shape that compiles to one.
+
+### The bad accesses are code being read as data
+
+```
+bad read32 at 0x8E420004 (last fn 0x000123C4)
+bad read32 at 0x8E420004 (last fn 0x00012328)
+bad write32 at 0x28420054 (last fn 0x000123A4)
+```
+
+`0x8E420004` is not an address -- it is the encoding of `lw $v0, 4($s2)`, and
+`0x28420054` is `slti $v0, $v0, 0x54`. **Instruction words are being used as
+pointers.** Something loads from the code segment and dereferences the result,
+which is the signature of a function-pointer table read at the wrong offset, or
+a structure whose pointer field overlaps code.
+
+All three cluster in `0x00012328`-`0x000123C4`, one small region, and they
+appear only now that execution gets this far. That is the next thing to read.
