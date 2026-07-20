@@ -678,3 +678,64 @@ them by name rather than guess.
 2. Keep the self-loop patch available as a bring-up switch. It is wrong as a
    fix, but it is the only way to see what lies past these stalls while the real
    cause is unresolved.
+
+---
+
+# The 17 misses are one site: a vtable loop
+
+Logging every miss with its calling function -- something never done, despite
+the misses being in the log since the session's first run:
+
+```
+miss 0..16: target=0x00000000 from fn 0x00066C6C ra=0x00066C7C
+miss 17:    target=0x0002E788 from fn 0x00018FB8
+miss 18:    target=0x003C61D8 from fn 0x0007EB24
+```
+
+All seventeen are **one call site**, and the code says exactly what it is:
+
+```
+00066C6C  lw   $t9, 12($s1)      ; t9 = object's vtable pointer
+00066C70  lw   $t9, 12($t9)      ; t9 = vtable[3]
+00066C74  jalr $ra, $t9          ; call it
+00066C78  addu $a0, $s1, $zero   ; delay slot: this = s1
+00066C7C  addiu $s0, $s0, 1
+00066C80  slti $v1, $s0, 17      ; 17 iterations
+```
+
+A loop calling method 3 on each of **seventeen objects** -- the shape of a
+"initialise every subsystem" pass. Every one of them has a **null vtable
+pointer**, so `lw $t9, 12($t9)` reads from address 12 and the call goes to 0.
+
+## Why this matters more than any of the loop theories
+
+Seventeen subsystems fail to initialise. The uninitialised hash tables that
+have been stalling execution are downstream of exactly that: no initialiser
+runs, so every table those subsystems own stays zeroed, and each walk over one
+self-loops. One cause, many symptoms -- which is why patching the first table
+just revealed a second.
+
+This lead was available from the first run. Four loop theories were chased past
+it. The misses were being *counted* rather than *identified*, and a count of
+17 looks like noise while "17 subsystems failed to construct" does not. The
+same mistake as the bad memory accesses, where logging the address turned a
+count into a diagnosis in one run.
+
+## The question to answer next
+
+Immediately before the loop:
+
+```
+00066C4C  jal 0x000681C8         ; then s1 = a0
+00066C58  jal 0x00067844         ; a0 = s1, a1 = 0
+```
+
+Two calls that plausibly construct or register these objects. Either they are
+not setting the vtable pointers, or `s1` does not point where the loop thinks.
+
+Worth checking specifically whether **PRX relocations** are involved. They were
+deferred early and never revisited. The module loads at its link address of 0,
+so a naive relocation pass would be an identity transform and *look* correct --
+but any slot the loader is supposed to fill would still be left at zero, which
+is precisely the observed symptom. Confirm rather than assume: dump the memory
+at `s1 + 12` and compare against the file image.
