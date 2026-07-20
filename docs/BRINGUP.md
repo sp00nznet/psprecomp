@@ -2533,3 +2533,57 @@ The second is cheap to settle and the API flaw is already recorded.
 Note the game reaches resource lookup at all: it has run far enough to ask for
 `b02_model`. That is considerably further than any earlier point in this
 document.
+
+## Game data is now present, and it changes nothing yet
+
+The microgame `.dat` containers were extracted from the disc to the host''s
+`iso_root` (never committed -- `work/` is gitignored and the repo carries no
+game data). Re-running:
+
+```
+last loop back-edge: 0x00067E58   (unchanged)
+no sceIo activity at all
+```
+
+**The game never reaches file I/O.** It stalls in the asset-name lookup before
+opening anything, so the missing data was not the blocker -- a clean negative
+that costs one run and removes an obvious suspicion permanently. The files are
+in place for when execution does get that far.
+
+# Where this ends
+
+`pixels written: 0`. WTF does not render.
+
+## The single remaining question
+
+Seventeen asset records, each with an empty resource list at `+184`. An empty
+circular list must have its head point at itself; these read zero, so the walk
+follows a null and spins. The static-constructor pass fixed exactly this defect
+for one family of lists and does not cover these.
+
+Next: settle whether their initialiser is (a) a constructor in a second table --
+`psp_ctors_find` returns only the longest candidate and would hide one -- or
+(b) a lazy per-asset routine that start-up has not reached. Option (a) is
+cheaper and the API flaw is already known.
+
+## What shipped
+
+- **`$ra` was never assigned by `jal`/`jalr`** -- 2 assignments across 137,748
+  instructions became 9,814. Every call in the program was affected, and the
+  bug invalidated every falsification recorded before it.
+- **Static constructors never ran.** A PRX gets its crt0 from the loader, so
+  the constructor table sat unwalked. Now discovered and executed by the
+  toolkit (`src/ctors.c`, ten tests). One missing pass explained a
+  ten-billion-iteration spin, virgin hash tables, null vtables, and a subsystem
+  tier that appeared never to initialise.
+- Bad memory accesses 28 -> 0. Every label dispatchable (13,682 entries).
+- The GE rasterizes: triangles, strips, sprites, six tests.
+- `vidt`/`vcst`/`viim`/`vfim` and a decoder fix for the immediate forms.
+- Coverage reporting corrected: 92% of `.text`, not 14% of the image.
+
+## What to distrust
+
+Every theory falsified before the `$ra` fix was tested against a program whose
+calls did not return correctly. One has already been overturned by re-running
+it. The rest are marked in this document and should be re-run before being
+relied on.
