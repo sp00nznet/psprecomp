@@ -1473,3 +1473,41 @@ state that something must populate. Three candidates, cheapest first:
 
 The measurement that decides between them is the same one used throughout:
 watch each, see which runs, and read what it writes.
+
+## Ruled out: module_start''s first calls are not heap setup
+
+`0x00091F1C` is **outside the code extent** (`0x00000000..0x00091E54`) -- it is
+an import stub, not a function. Both resolve to SysMemUserForUser:
+
+```
+0x00091F1C -> NID 0x7591C7DB  sceKernelSetCompiledSdkVersion
+0x00091F34 -> NID 0xF77D77CB  sceKernelSetCompilerVersion
+```
+
+SDK and compiler version registration, both already implemented as no-ops. The
+`0x02060010` argument is a version word, not a memory size -- it decodes as
+SDK 2.06.0010, which is exactly the shape it should have. The "~33.8 MB"
+reading in the previous section was pattern-matching on a large hex value and
+was wrong.
+
+Worth noting as a general check: **an address that fails to disassemble is
+information, not an error.** The code extent ends at `0x00091E54`, and anything
+above it is a stub. That distinction would have saved a round here and is worth
+applying to any `jal` target that looks unfamiliar.
+
+## Candidate list, updated
+
+1. ~~`0x00091F1C` / `0x00091F34`~~ -- version stubs, ruled out.
+2. `_getmodreent`''s fallback and whether its heap fields are ever populated.
+3. `$k0` -- necessary, measured insufficient alone.
+4. **New, and now the most likely**: the heap is obtained lazily. A dlmalloc of
+   this shape calls `sbrk` when its free lists cannot satisfy a request, and on
+   PSP `sbrk` reaches the kernel through `sceKernelAllocPartitionMemory`. That
+   import exists in the HLE. Whether the game ever calls it is checkable
+   directly -- and no firmware call log from these runs shows it being reached.
+
+## Next
+
+Find the `sbrk` the allocator falls back to, and watch it. If it never runs,
+the allocator is failing before it asks for memory; if it runs and returns
+failure, the fault is in the HLE''s partition allocator rather than in the game.
