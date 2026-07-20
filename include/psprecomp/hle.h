@@ -67,8 +67,25 @@ void psp_hle_init(void);
 /* Arguments 0-3 arrive in $a0-$a3; 4 and beyond are on the stack, at $sp+16
  * onward. The stack slots for the register arguments exist but are not
  * written by the caller, which is why the split is at 4 and not at 0. */
+/* Firmware calls take arguments 5-8 in $t0-$t3, not on the stack.
+ *
+ * Plain o32 spills the fifth argument onward to `sp+16`, and that is what this
+ * used to read. PSP firmware stubs do not: they load $t0-$t3 and branch, which
+ * is visible in the delay slot of every such call --
+ *
+ *     000002EC  addu  $a3, $s1, $zero
+ *     000002F0  jal   0x00091F14        ; sceKernelAllocPartitionMemory
+ *     000002F4  addiu $t0, $zero, 4096  ; argument 5: the alignment
+ *
+ * Reading `sp+16` instead returned whatever happened to be on the stack. For
+ * that call it produced 0x3AC85C where a power-of-two alignment belonged, so
+ * the allocator rejected a 15.9 MB request with ILLEGAL_ATTR -- and every
+ * failure this bring-up chased descended from it.
+ *
+ * Beyond eight, arguments do go on the stack. */
 static inline uint32_t psp_arg(int n) {
     if (n < 4) return psp_cpu.r[PSP_REG_A0 + n];
+    if (n < 8) return psp_cpu.r[PSP_REG_T0 + (n - 4)];
     return psp_read32(psp_cpu.r[PSP_REG_SP] + (uint32_t)n * 4);
 }
 

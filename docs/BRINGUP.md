@@ -3382,3 +3382,56 @@ spin forever afterwards.
    `sp+16` before the call. If it does, `psp_arg` is wrong; if not, the emitter
    is dropping a stack argument store.
 2. Then remove the granule fallback -- it is a bring-up shim, not a fix.
+
+---
+
+# Fixed: firmware calls pass arguments 5-8 in $t0-$t3
+
+`psp_arg(n)` read `sp + n*4` for `n >= 4`, which is plain MIPS o32. PSP
+firmware stubs do not follow it: they load `$t0`-`$t3` and branch, and the
+delay slot of the call says so plainly --
+
+```
+000002EC  addu  $a3, $s1, $zero
+000002F0  jal   0x00091F14        ; sceKernelAllocPartitionMemory
+000002F4  addiu $t0, $zero, 4096  ; argument 5: the alignment
+```
+
+Reading `sp+16` returned whatever was on the stack -- `0x3AC85C` for this call,
+where a power-of-two alignment belonged. The allocator correctly rejected a
+15.9 MB request as `ILLEGAL_ATTR`, and **every failure in this document
+descends from that one bad read**.
+
+With `psp_arg` corrected and the real alignment check restored (no shim):
+
+```
+AllocPartitionMemory: part=2 type=3 size=15976448 attr=0x1000 (20840448 free)
+
+                      before              after
+user memory free      20,840,448          4,864,000    (15.9 MB allocated)
+loop back-edge hits   ~2,400,000,000      765
+dispatch misses       19                  1
+```
+
+The heap is established, the ten-billion-iteration spin is gone, and it is a
+fix rather than a workaround: the game passes a valid alignment and psprecomp
+now reads it.
+
+This affects **every firmware function taking more than four arguments**, not
+just this one. It is the second bug of its class this session, after `$ra` was
+never assigned by `jal` -- both were calling-convention details that produced
+plausible-looking values instead of obvious failures.
+
+## Status
+
+`pixels written: 0`. The game now stops at `0x000743F0` after 265 function
+entries, inside allocator internals, on what is finally a correct path -- as
+against 470 entries that reached the GE only to spin forever afterwards.
+`GE: 0 lists` is therefore not a regression; the earlier lists were produced by
+a run that was already doomed.
+
+## Next
+
+Follow execution from `0x000743F0`. One dispatch miss remains, and 23 bad
+memory accesses -- both small enough to read individually, which is how every
+real finding in this document was made.

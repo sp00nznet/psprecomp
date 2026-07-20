@@ -162,13 +162,7 @@ static void hle_AllocPartitionMemory(void) {
     uint32_t align = 0x100;
     if (type == PSP_SMEM_LowAligned || type == PSP_SMEM_HighAligned) {
         align = want ? want : 0x100;
-        /* EXPERIMENT: a non-power-of-two alignment is rejected by hardware,
-         * and Lumberjack passes 0x3AC85C -- a data address, not an alignment.
-         * Either the fifth argument is not being read from the right stack
-         * slot, or the caller never wrote it. Falling back to the 256-byte
-         * granule instead of failing says which: if the game proceeds, the
-         * argument is the only problem. */
-        if (align & (align - 1)) align = 0x100;
+        if (align & (align - 1)) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_ATTR); return; }
         if (align < 0x100) align = 0x100;
     }
 
