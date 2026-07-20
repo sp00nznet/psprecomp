@@ -210,7 +210,10 @@ static void test_vfpu(void) {
     /* VFPU0 family: sub-opcode in bits 25..23. */
     dec(0x60000000, 0x08900000, A_VADD, "vadd");
     dec(0x60800000, 0x08900000, A_VSUB, "vsub");
-    dec(0x63800000, 0x08900000, A_VDIV, "vdiv");
+    /* vdiv is VFPU0 sub-opcode 4, not 7. This encoding previously used 7,
+     * matching a wrong decoder -- the test agreed with the bug rather than
+     * catching it. Both are corrected against the published encoding. */
+    dec(0x62000000, 0x08900000, A_VDIV, "vdiv (VFPU0 sub-opcode 4)");
     dec(0x64000000, 0x08900000, A_VMUL, "vmul");
     dec(0x64800000, 0x08900000, A_VDOT, "vdot");
 

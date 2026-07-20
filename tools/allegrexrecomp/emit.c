@@ -358,6 +358,17 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VCMP:
         fprintf(f, "%spsp_vcmp(%u, %u, %u, %u);\n", ind, in->vd & 0xF, in->vs, in->vt, in->vsize); return;
 
+    /* Prefixes gate the arithmetic above: with one pending, the next vector op
+     * traps instead of computing the unprefixed answer. Emitting these is what
+     * makes that guard fire at all -- without them the guard is dead code and
+     * every prefixed operation silently produces the wrong number. */
+    case A_VPFXS:
+        fprintf(f, "%spsp_vfpu_set_prefix(0, 0x%06Xu);\n", ind, in->raw & 0xFFFFFF); return;
+    case A_VPFXT:
+        fprintf(f, "%spsp_vfpu_set_prefix(1, 0x%06Xu);\n", ind, in->raw & 0xFFFFFF); return;
+    case A_VPFXD:
+        fprintf(f, "%spsp_vfpu_set_prefix(2, 0x%06Xu);\n", ind, in->raw & 0xFFFFFF); return;
+
     case A_SYSCALL:
         fprintf(f, "%spsp_syscall(0x%05Xu);\n", ind, (in->raw >> 6) & 0xFFFFF); return;
     case A_BREAK:

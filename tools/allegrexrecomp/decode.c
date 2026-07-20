@@ -213,6 +213,9 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VLOG2]    = { "vlog2",    F_VD_VS },
     [A_VI2F]     = { "vi2f",     F_VD_VS },
     [A_VF2I]     = { "vf2i",     F_VD_VS },
+    [A_VPFXS]    = { "vpfxs",    F_UNKNOWN },
+    [A_VPFXT]    = { "vpfxt",    F_UNKNOWN },
+    [A_VPFXD]    = { "vpfxd",    F_UNKNOWN },
     [A_VFPU_UNKNOWN] = { "vfpu?", F_UNKNOWN },
 };
 
@@ -398,11 +401,18 @@ static a_op decode_cop1(uint32_t w, uint32_t addr, a_insn *in) {
 /* COP2 on Allegrex is the VFPU control space: scalar moves between the integer
  * file and the vector file, plus branches on the VFPU condition codes. */
 static a_op decode_cop2(uint32_t w, uint32_t addr, a_insn *in) {
+    /* Sub-opcode is the rs field. An earlier revision had mfv at 0 and mtv at
+     * 4, which are mfc2 and mtc2 — the *integer* moves. The vector moves are 3
+     * and 7. Confirmed against this module: the only values that occur are 3,
+     * 7 and 8 (mfv, mtv, and the branch group), which is exactly what a game
+     * shuttling values between the integer and vector files would use. */
     switch (RS_F(w)) {
-    case 0x00: return A_MFV;
-    case 0x03: return A_MFVC;
-    case 0x04: return A_MTV;
-    case 0x07: return A_MTVC;
+    case 0x00: return A_MFC1;    /* mfc2: integer move, no vector register */
+    case 0x02: return A_CFC1;    /* cfc2 */
+    case 0x03: return A_MFV;
+    case 0x04: return A_MTC1;    /* mtc2 */
+    case 0x06: return A_CTC1;    /* ctc2 */
+    case 0x07: return A_MTV;
     case 0x08:
         switch (RT_F(w) & 3) {
         case 0: set_branch(in, addr, 0); return A_BVF;
@@ -496,8 +506,22 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         switch ((word >> 23) & 7) {
         case 0: op = A_VADD; break;
         case 1: op = A_VSUB; break;
-        case 7: op = A_VDIV; break;
+        /* vdiv is sub-opcode 4, not 7. An earlier revision had it at 7, which
+         * both mis-decoded two real instructions and left actual vdiv falling
+         * through as unknown. Corrected against the published encoding. */
+        case 4: op = A_VDIV; break;
         default: op = A_VFPU_UNKNOWN; break;
+        }
+        break;
+
+    /* VFPU5: the operand-prefix instructions, plus the immediate loads.
+     * Sub-opcode is bits 25..23; each prefix occupies two values. */
+    case 0x37:
+        switch ((word >> 23) & 7) {
+        case 0: case 1: op = A_VPFXS; break;
+        case 2: case 3: op = A_VPFXT; break;
+        case 4: case 5: op = A_VPFXD; break;
+        default: op = A_VFPU_UNKNOWN; break;   /* viim.s / vfim.s */
         }
         break;
     case 0x19:
@@ -526,8 +550,13 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
     /* The rest of the VFPU encoding space. We recognise it *as* VFPU so the
      * emitter refuses loudly rather than emitting silently-wrong code, and so
      * coverage reports tell us how much of a game actually needs it. */
+    /* The rest of the VFPU encoding space. 0x34 (VFPU4: vmov/vabs/vrcp/vsin/
+     * vcos/vf2i/vi2f/vcmov and friends) and 0x3C (VFPU6: vmmul, vtfm2/3/4,
+     * vmscl, vrot) are mapped but not yet implemented — see docs/VFPU.md.
+     * Recognised as VFPU so they refuse loudly instead of decoding as
+     * something else. */
     case 0x1C: case 0x1D: case 0x1E:
-    case 0x34: case 0x35: case 0x37:
+    case 0x34: case 0x35:
     case 0x3C: case 0x3D: case 0x3F:
         op = A_VFPU_UNKNOWN;
         break;

@@ -83,6 +83,11 @@ typedef enum {
     A_VCMP, A_VMIN, A_VMAX, A_VSCMP, A_VSGE, A_VSLT,
     A_VMOV, A_VABS, A_VNEG, A_VZERO, A_VONE, A_VRCP, A_VRSQ, A_VSQRT,
     A_VSIN, A_VCOS, A_VEXP2, A_VLOG2, A_VI2F, A_VF2I,
+    /* Prefix instructions. These compute nothing: they set a register that
+     * rewrites the operands of the *next* instruction. Decoding them is not
+     * optional — if they are missed, the following arithmetic silently
+     * computes the unprefixed answer. */
+    A_VPFXS, A_VPFXT, A_VPFXD,
     /* Any VFPU encoding we recognise as VFPU but do not yet name. Emitting
      * these is a hard error rather than a silent wrong answer. */
     A_VFPU_UNKNOWN,
