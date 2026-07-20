@@ -445,6 +445,10 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     an->insns = an->vfpu = an->invalid = 0;
     an->ntables = an->ntable_targets = 0;
     an->bytes_reached = 0;
+    /* The import stubs sit at the end of .text, so their extent is the best
+     * available executable bound when no section header gives one. */
+    if (!an->text_size && an->stub_addr && an->stub_size)
+        an->text_size = an->stub_addr + an->stub_size - an->base;
 
     const uint32_t nwords = an->size >> 2;
     uint8_t *seen = (uint8_t *)calloc(nwords ? nwords : 1, 1);

@@ -107,6 +107,9 @@ typedef struct {
     uint64_t vfpu;
     uint64_t invalid;
     uint32_t bytes_reached;
+    /* Executable extent, when the container reports one. Distinct from size,
+     * which spans .data and .bss too. */
+    uint32_t text_size;
 
     /* Which function owns each word: the owning function's entry address, or
      * A_NO_OWNER. The emitter needs this because a function's instructions are

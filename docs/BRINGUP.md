@@ -2270,3 +2270,46 @@ Two readings, and they are cheaply distinguishable:
 
 Reading 2 is the more troubling one and is cheap to check: confirm whether a
 function initialising `s0 + 184` exists in the generated output at all.
+
+## Coverage was never 14%: a reporting bug
+
+```
+before:  reached: 550992 bytes (14.18% of .text)
+after:   reached: 550992 bytes (92.0% of .text, 598892 bytes)
+```
+
+The denominator was the whole loaded image -- code plus `.data` plus `.bss` --
+while the label said `.text`. Discovery covers **92%** of the executable range,
+not 14%.
+
+So the coverage lead is dead, cheaply, and the tool no longer misreports. But
+the number had been printed on every run of this session and read past every
+time. A statistic that is wrong by six times and describes the single most
+important property of a static recompiler is exactly the kind of thing that
+should have been checked on day one; it survived because it looked like
+background noise rather than a claim.
+
+Fixed by deriving the executable extent from the import stubs, which sit at the
+end of `.text`, and by naming the denominator in the output when it is not
+known.
+
+## Standing state at session end
+
+`pixels written: 0`. WTF does not render.
+
+Fixed and shipped this session:
+
+- `$ra` was never assigned by `jal`/`jalr` -- 2 assignments across 137,748
+  instructions became 9,814. Affected every call in the program.
+- Static constructors never ran; found the table at `0x003B2FE4` and running
+  its eight entries moved the hang and reached previously-dead code.
+- Bad memory accesses 28 -> 0.
+- Every label dispatchable (13,682 entries).
+- The GE rasterizes (triangles, strips, sprites, six tests).
+- `vidt`/`vcst`/`viim`/`vfim`, plus a decoder fix for the immediate forms.
+- Module id reported, silencing the game''s own libc diagnostic.
+- Coverage statistic corrected: 92%, not 14%.
+
+Open: an uninitialised circular list at `s0 + 184` reached from
+`0x00067E58`, with the constructors now running. Next steps in the section
+above.

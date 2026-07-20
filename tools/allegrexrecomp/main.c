@@ -587,8 +587,19 @@ static int cmd_funcs(const char *path, int list) {
            scanned ? "scanned data pointers (heuristic)" : "relocation pointers");
     printf("\n");
     printf("functions:  %d\n", an.nfuncs);
-    printf("reached:    %u bytes (%.2f%% of .text)\n", an.bytes_reached,
-           an.size ? 100.0 * an.bytes_reached / an.size : 0.0);
+    /* `an.size` is the whole loaded image -- code plus .data plus .bss -- so
+     * dividing by it and calling the result "of .text" understates coverage by
+     * roughly six times. This module reported 14.18% while actually covering
+     * 92.2% of its executable range, which reads as a glaring hole in
+     * discovery and is not one. Report the executable extent when it is known,
+     * and say plainly which denominator was used. */
+    if (an.text_size)
+        printf("reached:    %u bytes (%.1f%% of .text, %u bytes)\n",
+               an.bytes_reached, 100.0 * an.bytes_reached / an.text_size,
+               an.text_size);
+    else
+        printf("reached:    %u bytes (%.2f%% of the loaded image; .text extent unknown)\n",
+               an.bytes_reached, an.size ? 100.0 * an.bytes_reached / an.size : 0.0);
     printf("imports:    %d distinct firmware calls\n", an.nimports);
 
     /* Which firmware libraries this module actually needs. This is the HLE
