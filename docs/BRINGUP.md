@@ -804,3 +804,28 @@ before drawing a conclusion from the trace.
   **not** a relocation or loader fault.
 - Whatever fills them either has not been found yet or is not running.
 - `0x00067844` is the only remaining candidate on the path.
+
+## 0x00067844 is not the constructor either
+
+Called with `a1 = 0`, so `beq $s1, $zero` is taken immediately:
+
+```
+00067878  sb $zero, 31980($s0)     ; s0 = the object
+00067880  sw $zero, 32080($s0)
+```
+
+Far-offset fields again, nothing near `+12`. **Neither call before the vtable
+loop writes the vtable pointer.**
+
+That is worth stating as a positive result rather than another dead end: the
+object at `$s1` is large (constructors write past `+0x7CE8`, so >32 KB), and
+its vtable slot at `+12` is filled by neither of the two functions on the path.
+So the search should move *backwards* -- to wherever `$a0` was set before
+`0x00066C4C` -- rather than forwards into the loop.
+
+## Next
+
+Read `0x00066C6C`'s function from its entry, not from the loop: find where
+`$a0` is established before the two constructor calls. Whoever produces that
+pointer either allocates the object and should install the vtable, or hands
+over one that was never constructed.
