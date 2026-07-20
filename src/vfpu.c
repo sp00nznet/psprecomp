@@ -1,6 +1,9 @@
 /* psprecomp — the VFPU. See include/psprecomp/vfpu.h. */
 
 #include "psprecomp/vfpu.h"
+#include "psprecomp/recomp_rt.h"
+
+#include <math.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -155,6 +158,104 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
     float out[4];
     for (int i = 0; i < n; i++) out[i] = psp_cpu.v[s[i]] * k;
     for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = out[i];
+}
+
+/* ---- unary element-wise ops (VFPU4) -------------------------------------- */
+
+static float sat0(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+static float sat1(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
+
+void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vunary")) return;
+
+    int d[4], s[4];
+    int n = psp_vfpu_regs(vd, size, d);
+    psp_vfpu_regs(vs, size, s);
+
+    float out[4];
+    for (int i = 0; i < n; i++) {
+        const float a = psp_cpu.v[s[i]];
+        float r;
+        switch (op) {
+        case PSP_VU_MOV:  r = a;            break;
+        case PSP_VU_ABS:  r = a < 0 ? -a : a; break;
+        case PSP_VU_NEG:  r = -a;           break;
+        case PSP_VU_ZERO: r = 0.0f;         break;
+        case PSP_VU_ONE:  r = 1.0f;         break;
+        case PSP_VU_RCP:  r = 1.0f / a;     break;
+        case PSP_VU_NRCP: r = -1.0f / a;    break;
+        case PSP_VU_RSQ:  r = 1.0f / psp_fsqrt(a); break;
+        case PSP_VU_SQRT: r = psp_fsqrt(a); break;
+        /* The PSP's trig takes its argument in *quarter turns*: vsin(x) is
+         * sin(x * pi/2), not sin(x). Treating it as radians gives a result
+         * that is smooth, plausible, and wrong -- rotations end up at the
+         * wrong angle rather than visibly broken. */
+        case PSP_VU_SIN:  r = sinf(a * 1.5707963267948966f);  break;
+        case PSP_VU_COS:  r = cosf(a * 1.5707963267948966f);  break;
+        case PSP_VU_NSIN: r = -sinf(a * 1.5707963267948966f); break;
+        case PSP_VU_ASIN: r = asinf(a) * 0.6366197723675814f; break;  /* 2/pi */
+        case PSP_VU_EXP2: r = powf(2.0f, a);   break;
+        case PSP_VU_REXP2:r = 1.0f / powf(2.0f, a); break;
+        case PSP_VU_LOG2: r = logf(a) * 1.4426950408889634f; break;   /* 1/ln2 */
+        case PSP_VU_SAT0: r = sat0(a);      break;
+        case PSP_VU_SAT1: r = sat1(a);      break;
+        /* Conversions move between the float and integer *interpretations* of
+         * a vector register; the bits are reinterpreted, not just cast. */
+        case PSP_VU_F2IZ: r = psp_bits_to_f32((uint32_t)(int32_t)a); break;
+        case PSP_VU_I2F:  r = (float)(int32_t)psp_f32_to_bits(a);    break;
+        default:          psp_vfpu_unimplemented(psp_cpu.pc, "vunary"); return;
+        }
+        out[i] = r;
+    }
+    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = out[i];
+}
+
+/* ---- matrix ops without a multiply --------------------------------------- */
+
+/* A matrix register names `size` consecutive columns, each a vector of `size`
+ * lanes. Writing one column at a time through the same addressing the vector
+ * ops use keeps the two consistent -- which matters because a game builds a
+ * matrix with these and then transforms with vtfm. */
+static void matrix_cols(uint32_t vd, int size, int cols[4][4]) {
+    for (int c = 0; c < size; c++)
+        psp_vfpu_regs((vd & ~0x60u) | ((uint32_t)c << 5), size, cols[c]);
+}
+
+void psp_vmidt(uint32_t vd, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vmidt")) return;
+    int cols[4][4];
+    matrix_cols(vd, size, cols);
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++)
+            psp_cpu.v[cols[c][r]] = (c == r) ? 1.0f : 0.0f;
+}
+
+void psp_vmzero(uint32_t vd, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vmzero")) return;
+    int cols[4][4];
+    matrix_cols(vd, size, cols);
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++) psp_cpu.v[cols[c][r]] = 0.0f;
+}
+
+void psp_vmone(uint32_t vd, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vmone")) return;
+    int cols[4][4];
+    matrix_cols(vd, size, cols);
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++) psp_cpu.v[cols[c][r]] = 1.0f;
+}
+
+void psp_vmmov(uint32_t vd, uint32_t vs, int size) {
+    if (!take_prefixes(psp_cpu.pc, "vmmov")) return;
+    int dc[4][4], sc[4][4];
+    matrix_cols(vd, size, dc);
+    matrix_cols(vs, size, sc);
+    float tmp[4][4];
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++) tmp[c][r] = psp_cpu.v[sc[c][r]];
+    for (int c = 0; c < size; c++)
+        for (int r = 0; r < size; r++) psp_cpu.v[dc[c][r]] = tmp[c][r];
 }
 
 /* Compare, writing one condition bit per lane plus the any/all summary bits

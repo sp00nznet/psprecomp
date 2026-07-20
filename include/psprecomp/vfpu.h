@@ -68,6 +68,24 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 /* Comparison, writing the VFPU condition codes. */
 void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size);
 
+/* Unary element-wise ops (VFPU4). One entry point rather than eighteen, since
+ * they differ only in the scalar function applied per lane. */
+enum {
+    PSP_VU_MOV = 0, PSP_VU_ABS, PSP_VU_NEG, PSP_VU_ZERO, PSP_VU_ONE,
+    PSP_VU_RCP, PSP_VU_RSQ, PSP_VU_SQRT, PSP_VU_SIN, PSP_VU_COS,
+    PSP_VU_EXP2, PSP_VU_LOG2, PSP_VU_SAT0, PSP_VU_SAT1,
+    PSP_VU_NRCP, PSP_VU_NSIN, PSP_VU_REXP2, PSP_VU_ASIN,
+    PSP_VU_F2IZ, PSP_VU_I2F
+};
+void psp_vunary(int op, uint32_t vd, uint32_t vs, int size);
+
+/* Matrix ops that need no multiply: identity, zero, one, and copy. `size` is
+ * the matrix order (2, 3 or 4). */
+void psp_vmidt(uint32_t vd, int size);
+void psp_vmzero(uint32_t vd, int size);
+void psp_vmone(uint32_t vd, int size);
+void psp_vmmov(uint32_t vd, uint32_t vs, int size);
+
 /* Prefix state. Set by vpfxs/vpfxt/vpfxd; consumed (and cleared) by the next
  * arithmetic instruction. While any is pending, arithmetic traps. */
 void psp_vfpu_set_prefix(int which, uint32_t value);

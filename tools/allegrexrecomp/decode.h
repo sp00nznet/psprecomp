@@ -88,6 +88,12 @@ typedef enum {
      * optional — if they are missed, the following arithmetic silently
      * computes the unprefixed answer. */
     A_VPFXS, A_VPFXT, A_VPFXD,
+    /* VFPU4 (opcode 0x34, rs=0): unary element-wise ops. */
+    A_VIDT, A_VSAT0, A_VSAT1, A_VASIN, A_VNRCP, A_VNSIN, A_VREXP2,
+    A_VCST, A_VF2IN, A_VF2IZ, A_VF2IU, A_VF2ID, A_VCMOV, A_VWBN,
+    /* VFPU6 (opcode 0x3C): the matrix unit. */
+    A_VMMUL, A_VTFM2, A_VTFM3, A_VTFM4, A_VMSCL, A_VCRSP, A_VROT,
+    A_VMMOV, A_VMIDT, A_VMZERO, A_VMONE,
     /* Any VFPU encoding we recognise as VFPU but do not yet name. Emitting
      * these is a hard error rather than a silent wrong answer. */
     A_VFPU_UNKNOWN,

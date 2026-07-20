@@ -362,6 +362,42 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
      * traps instead of computing the unprefixed answer. Emitting these is what
      * makes that guard fire at all -- without them the guard is dead code and
      * every prefixed operation silently produces the wrong number. */
+    /* VFPU4 unary ops, all through one runtime entry point. */
+    case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
+    case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
+    case A_VEXP2: case A_VLOG2: case A_VSAT0: case A_VSAT1:
+    case A_VNRCP: case A_VNSIN: case A_VASIN: case A_VF2IZ: case A_VI2F: {
+        static const struct { a_op op; const char *sel; } U[] = {
+            { A_VMOV, "PSP_VU_MOV" },   { A_VABS, "PSP_VU_ABS" },
+            { A_VNEG, "PSP_VU_NEG" },   { A_VZERO,"PSP_VU_ZERO" },
+            { A_VONE, "PSP_VU_ONE" },   { A_VRCP, "PSP_VU_RCP" },
+            { A_VRSQ, "PSP_VU_RSQ" },   { A_VSQRT,"PSP_VU_SQRT" },
+            { A_VSIN, "PSP_VU_SIN" },   { A_VCOS, "PSP_VU_COS" },
+            { A_VEXP2,"PSP_VU_EXP2" },  { A_VLOG2,"PSP_VU_LOG2" },
+            { A_VSAT0,"PSP_VU_SAT0" },  { A_VSAT1,"PSP_VU_SAT1" },
+            { A_VNRCP,"PSP_VU_NRCP" },  { A_VNSIN,"PSP_VU_NSIN" },
+            { A_VASIN,"PSP_VU_ASIN" },  { A_VF2IZ,"PSP_VU_F2IZ" },
+            { A_VI2F, "PSP_VU_I2F" },
+        };
+        for (size_t k = 0; k < sizeof U / sizeof U[0]; k++) {
+            if (U[k].op != in->op) continue;
+            fprintf(f, "%spsp_vunary(%s, %u, %u, %u);\n",
+                    ind, U[k].sel, in->vd, in->vs, in->vsize);
+            return;
+        }
+        break;
+    }
+
+    /* Matrix ops that need no multiply. `vsize` is the matrix order here. */
+    case A_VMIDT:
+        fprintf(f, "%spsp_vmidt(%u, %u);\n", ind, in->vd, in->vsize); return;
+    case A_VMZERO:
+        fprintf(f, "%spsp_vmzero(%u, %u);\n", ind, in->vd, in->vsize); return;
+    case A_VMONE:
+        fprintf(f, "%spsp_vmone(%u, %u);\n", ind, in->vd, in->vsize); return;
+    case A_VMMOV:
+        fprintf(f, "%spsp_vmmov(%u, %u, %u);\n", ind, in->vd, in->vs, in->vsize); return;
+
     case A_VPFXS:
         fprintf(f, "%spsp_vfpu_set_prefix(0, 0x%06Xu);\n", ind, in->raw & 0xFFFFFF); return;
     case A_VPFXT:

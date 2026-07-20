@@ -197,9 +197,17 @@ static void test_vfpu(void) {
      * them loudly. See docs/VFPU.md. */
     a_insn in;
 
-    a_decode(0xD0000000, 0x08900000, &in);
-    CHECK(in.op == A_VFPU_UNKNOWN || in.op == A_INVALID,
-          "0xD0000000 must not decode as an integer op (got %s)", a_mnemonic(in.op));
+    /* 0xD0000000 is opcode 0x34 with rs=0, rt=0 -- VFPU4's vmov. It used to
+     * assert as "unknown" here, which was only true while 0x34 was unmapped;
+     * the assertion outlived the gap it described. */
+    dec(0xD0000000, 0x08900000, A_VMOV, "vmov (VFPU4 rs=0 rt=0)");
+
+    /* Something still genuinely unmapped: opcode 0x35 (VFPU6's sibling table).
+     * It must be recognised as VFPU rather than falling through to an integer
+     * op, so the emitter refuses it instead of emitting nonsense. */
+    a_decode(0xD4000000, 0x08900000, &in);
+    CHECK(in.op == A_VFPU_UNKNOWN,
+          "an unmapped VFPU encoding stays VFPU-unknown (got %s)", a_mnemonic(in.op));
 
     /* lv.q / sv.q are ordinary opcodes and we do decode those. */
     dec(0xD8000000, 0x08900000, A_LV_Q, "lv.q");

@@ -213,6 +213,31 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VLOG2]    = { "vlog2",    F_VD_VS },
     [A_VI2F]     = { "vi2f",     F_VD_VS },
     [A_VF2I]     = { "vf2i",     F_VD_VS },
+    [A_VIDT]     = { "vidt",     F_VD_VS },
+    [A_VSAT0]    = { "vsat0",    F_VD_VS },
+    [A_VSAT1]    = { "vsat1",    F_VD_VS },
+    [A_VASIN]    = { "vasin",    F_VD_VS },
+    [A_VNRCP]    = { "vnrcp",    F_VD_VS },
+    [A_VNSIN]    = { "vnsin",    F_VD_VS },
+    [A_VREXP2]   = { "vrexp2",   F_VD_VS },
+    [A_VCST]     = { "vcst",     F_VD_VS },
+    [A_VF2IN]    = { "vf2in",    F_VD_VS },
+    [A_VF2IZ]    = { "vf2iz",    F_VD_VS },
+    [A_VF2IU]    = { "vf2iu",    F_VD_VS },
+    [A_VF2ID]    = { "vf2id",    F_VD_VS },
+    [A_VCMOV]    = { "vcmov",    F_VD_VS },
+    [A_VWBN]     = { "vwbn",     F_VD_VS },
+    [A_VMMUL]    = { "vmmul",    F_VD_VS_VT },
+    [A_VTFM2]    = { "vtfm2",    F_VD_VS_VT },
+    [A_VTFM3]    = { "vtfm3",    F_VD_VS_VT },
+    [A_VTFM4]    = { "vtfm4",    F_VD_VS_VT },
+    [A_VMSCL]    = { "vmscl",    F_VD_VS_VT },
+    [A_VCRSP]    = { "vcrsp",    F_VD_VS_VT },
+    [A_VROT]     = { "vrot",     F_VD_VS },
+    [A_VMMOV]    = { "vmmov",    F_VD_VS },
+    [A_VMIDT]    = { "vmidt",    F_VD_VS },
+    [A_VMZERO]   = { "vmzero",   F_VD_VS },
+    [A_VMONE]    = { "vmone",    F_VD_VS },
     [A_VPFXS]    = { "vpfxs",    F_UNKNOWN },
     [A_VPFXT]    = { "vpfxt",    F_UNKNOWN },
     [A_VPFXD]    = { "vpfxd",    F_UNKNOWN },
@@ -555,9 +580,76 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
      * vmscl, vrot) are mapped but not yet implemented — see docs/VFPU.md.
      * Recognised as VFPU so they refuse loudly instead of decoding as
      * something else. */
+    /* VFPU4 group. Two levels: rs (25..21) picks the sub-table, rt (20..16)
+     * picks the operation within it. Confirmed against a real module -- every
+     * rs value observed there falls inside this map with nothing left over,
+     * which is what distinguishes the right field from a plausible one. */
+    case 0x34:
+        switch (RS_F(word)) {
+        case 0x00:                                  /* VFPU4: unary ops */
+            switch (RT_F(word)) {
+            case 0x00: op = A_VMOV;   break;
+            case 0x01: op = A_VABS;   break;
+            case 0x02: op = A_VNEG;   break;
+            case 0x03: op = A_VIDT;   break;
+            case 0x04: op = A_VSAT0;  break;
+            case 0x05: op = A_VSAT1;  break;
+            case 0x06: op = A_VZERO;  break;
+            case 0x07: op = A_VONE;   break;
+            case 0x10: op = A_VRCP;   break;
+            case 0x11: op = A_VRSQ;   break;
+            case 0x12: op = A_VSIN;   break;
+            case 0x13: op = A_VCOS;   break;
+            case 0x14: op = A_VEXP2;  break;
+            case 0x15: op = A_VLOG2;  break;
+            case 0x16: op = A_VSQRT;  break;
+            case 0x17: op = A_VASIN;  break;
+            case 0x18: op = A_VNRCP;  break;
+            case 0x1A: op = A_VNSIN;  break;
+            case 0x1C: op = A_VREXP2; break;
+            default:   op = A_VFPU_UNKNOWN; break;
+            }
+            break;
+        case 0x03: op = A_VCST;  break;
+        case 0x10: op = A_VF2IN; break;
+        case 0x11: op = A_VF2IZ; break;
+        case 0x12: op = A_VF2IU; break;
+        case 0x13: op = A_VF2ID; break;
+        case 0x14: op = A_VI2F;  break;
+        case 0x15: op = A_VCMOV; break;
+        /* VFPU7 (rs=1) and VFPU9 (rs=2) are the conversion and shuffle
+         * tables; mapped but not broken out yet. */
+        default:   op = A_VFPU_UNKNOWN; break;
+        }
+        break;
+
+    /* VFPU6: the matrix unit. rs selects, and the multiply/transform entries
+     * occupy four consecutive values each (the low two bits carry part of the
+     * operand encoding). */
+    case 0x3C:
+        switch (RS_F(word) & 0x1C) {
+        case 0x00: op = A_VMMUL; break;
+        case 0x04: op = A_VTFM2; break;
+        case 0x08: op = A_VTFM3; break;
+        case 0x0C: op = A_VTFM4; break;
+        case 0x10: op = A_VMSCL; break;
+        case 0x14: op = A_VCRSP; break;
+        case 0x1C:
+            if (RS_F(word) == 0x1D) { op = A_VROT; break; }
+            switch ((word >> 16) & 0xF) {   /* VFPUMatrix1 */
+            case 0x0: op = A_VMMOV;  break;
+            case 0x3: op = A_VMIDT;  break;
+            case 0x6: op = A_VMZERO; break;
+            case 0x7: op = A_VMONE;  break;
+            default:  op = A_VFPU_UNKNOWN; break;
+            }
+            break;
+        default: op = A_VFPU_UNKNOWN; break;
+        }
+        break;
+
     case 0x1C: case 0x1D: case 0x1E:
-    case 0x34: case 0x35:
-    case 0x3C: case 0x3D: case 0x3F:
+    case 0x35: case 0x3D: case 0x3F:
         op = A_VFPU_UNKNOWN;
         break;
 
