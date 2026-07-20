@@ -739,3 +739,32 @@ so a naive relocation pass would be an identity transform and *look* correct --
 but any slot the loader is supposed to fill would still be left at zero, which
 is precisely the observed symptom. Confirm rather than assume: dump the memory
 at `s1 + 12` and compare against the file image.
+
+## The object is entirely zero after its constructor ran
+
+```
+vtable loop: s1=0x00415B68  vptr@+12=0x00000000
+  s1+00 .. s1+28 = 0x00000000   (every word)
+```
+
+`0x00415B68` is past the file image (`filesz 0x3B4000`) and inside `.bss`
+(`memsz 0x4B0000`), so zero is its correct *initial* state -- this is not a
+relocation problem, and the relocation theory from the previous section should
+not be pursued on this evidence.
+
+A constructor is supposed to fill it. `0x000681C8` is called at `0x00066C4C`
+with the object already in `$a0` (`$s1` is set from `$a0` in the delay slot),
+and `psp_func_000681D4` appears in the entry trace -- so that code **ran** and
+left every word zero.
+
+That is the sharpest question yet, and it is one function wide: does
+`0x000681C8` write to its `$a0`, and does the recompiled version do the same?
+A constructor that runs and writes nothing points at codegen -- a store whose
+address or predicate is wrong -- rather than at anything architectural.
+
+## Next
+
+1. Trace `0x000681C8` instruction by instruction against its emitted C, looking
+   for stores that should land in `$a0`.
+2. If the stores are emitted correctly, watch `$a0` across the call: the object
+   pointer may be wrong on entry, in which case the fault is in its caller.
