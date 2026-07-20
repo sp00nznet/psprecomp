@@ -673,6 +673,21 @@ static void emit_function(ectx *c, const a_func *fn) {
 
         if (in.is_call) {                        /* jal / jalr */
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
+            /* Set $ra.
+             *
+             * Recompiled calls are C calls and `jr $ra` is emitted as `return`,
+             * so it is tempting to treat $ra as dead. It is not. Non-leaf
+             * functions do `sw $ra, N($sp)` on entry and `lw $ra, N($sp)`
+             * before returning, and code that takes a return address for any
+             * other purpose reads it too. Leaving $ra stale means those saves
+             * store garbage, and any later `jr` through a restored copy jumps
+             * nowhere.
+             *
+             * That is what the 17 dispatch misses to 0x00000000 were, and why
+             * $ra held a stack address at the stall. The branch-and-link forms
+             * a few lines above already did this correctly; jal and jalr --
+             * every ordinary call in the program -- did not. */
+            fprintf(f, "    %s = 0x%08Xu;\n", RN[31], a + 8);
             if (in.is_indirect) fprintf(f, "    psp_dispatch(%s);\n", RN[in.rs]);
             else                emit_static_call(c, in.target);
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
