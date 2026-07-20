@@ -3778,3 +3778,48 @@ objects, null vtables, self-looping lists -- is what a shifting stack frame
 produces: values restored from adjacent slots, plausible and wrong. It is the
 same signature as the two calling-convention faults already fixed, and it is
 measured with two register reads rather than inferred from emitted code.
+
+### Narrowing the leak: one iteration still takes the failure path
+
+`0x0000E06C` is not the leaker -- its emitted epilogue is exact:
+
+```
+    r_s1 = psp_read32(r_sp + 4);
+    r_s0 = psp_read32(r_sp + 0);
+    r_sp = r_sp + 16;
+    return;
+```
+
+And measuring the loop''s other callee:
+
+```
+at 0x00000914: sp=0x09FFFB30 s1=0x0000E124     (one call only)
+at 0x0000E06C: sp=0x09FFFB60 / 0x09FFFB30      (two calls)
+```
+
+**Two allocator calls, one call to `0x00000914`.** The loop body calls the
+allocator, then branches on the result:
+
+```
+00074400  bnel $s4, $zero, 0x0007443C   ; success -> use it
+00074408  addiu $a0, $zero, 10          ; failure path
+...
+00074448  jal  0x00000914               ; only on the success path
+```
+
+So one of the two iterations still takes the **allocation-failure path**, and
+`$sp` drops 48 bytes across it. The leak is in that error path, not in the
+success path -- which is why it survived the allocation fix: that fix made
+allocations succeed, but evidently not all of them.
+
+Two things follow, and both are checkable:
+
+1. Some allocation still fails. The 32-byte request succeeds now; something
+   else in this loop does not. Logging every allocator return, not just its
+   arguments, would say which.
+2. The failure path leaks `$sp`. It calls `0x000472D0` and others; measuring
+   `$sp` at entry and exit of each names the function whose frame is unbalanced.
+
+The second is the more valuable: a function that leaves `$sp` unbalanced
+corrupts every callee-saved register its caller restores afterwards, and would
+do so for any game, not just this one.
