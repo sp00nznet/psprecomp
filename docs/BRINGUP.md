@@ -2981,3 +2981,53 @@ conclusion once before and withdrawn it, because the pointer was fine and the
 measurement was reading a stale register at a non-entry address. `0x00066C34`
 is a real function entry, so a watch there is observable -- but check
 `psp_body_00066C34` exists before trusting a negative.
+
+## The allocation does fail after all
+
+Measuring at `0x0007443C`:
+
+```
+alloc result: v0=0x00834000 s4=0x00000000
+alloc result: v0=0x0020D000 s4=0x00000000
+...
+```
+
+`$s4` holds the allocation result (`addu $s4, $v0, $zero` at `0x000743FC`) and
+it is **zero**. The guard is `bnel $s4, $zero, 0x0007443C` -- a likely branch
+taken only when the allocation succeeded -- so with `$s4 == 0` it is not taken,
+the delay slot is nullified, and control falls into the error path at
+`0x00074408`.
+
+`0x0007443C` is nevertheless *marked reached*, because execution arrives there
+later by fall-through from the error path rather than through the branch.
+
+**So the earlier conclusion "the 32-byte allocation succeeds" was wrong.** It
+was drawn from label reachability alone, and reachability does not say *how* a
+label was reached. That is the third distinct way this document has been misled
+by the watch/mark mechanism, and the sharpest: the address was a real label,
+the mark was real, and the inference was still invalid.
+
+The `v0` values (`0x00834000` = 8,601,600, `0x0020D000` = 2,150,400, ...) are
+the sizes seen earlier from the wrong register -- they are live in `$v0` at
+this point, not allocation results.
+
+## What this reopens
+
+Allocation failure is back, and it now has direct evidence rather than
+inference. That is consistent with everything downstream: a null object pointer
+handed on, seventeen records that were never real, vptrs that stay zero, and a
+walk over `.bss`.
+
+It also re-raises `sceKernelAllocPartitionMemory` never being called: the
+game''s dlmalloc has an arena but nothing grows it, so once the arena cannot
+satisfy a request the allocator returns null and never asks the kernel for more.
+
+### Next
+
+Read the failure path at `0x00074408` to confirm it is an out-of-memory branch,
+then find where the game''s heap is supposed to come from -- the arena base and
+limit that `0x0000E0AC` consults. That is a concrete search and the allocator
+is already understood as far as its bucket selection.
+
+**Do not** re-derive "the allocation succeeds" from a reachability mark. Read
+`$s4`.
