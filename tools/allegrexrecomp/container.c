@@ -558,12 +558,32 @@ int psp_collect_exports(const uint8_t *d, size_t len,
 
     int found = 0;
     /* Each entry is 0x10 bytes and describes one exported library. */
-    for (uint32_t e = mi->ent_top; e + 0x10 <= mi->ent_end; e += 0x10) {
+    uint32_t e = mi->ent_top;
+    while (e + 0x10 <= mi->ent_end) {
         size_t off = (uint32_t)(e + load_bias);
         if (off + 0x10 > len) break;
 
-        uint8_t  nfunc   = d[off + 0x08];
+        /* The export entry has the same shape as an import entry:
+         *
+         *   0x08 u8   entLen     entry size in words
+         *   0x09 u8   varCount
+         *   0x0A u16  funcCount
+         *   0x0C u32  table
+         *
+         * An earlier version read nfunc from 0x08 and nvar from 0x09 -- that
+         * is entLen and varCount, so both counts were wrong. On this module it
+         * gave 4 functions and 3 variables instead of 2 and 3, which made the
+         * address half of the table start four entries early: the "function
+         * addresses" came out as data pointers and, past the end of the table,
+         * as NIDs belonging to the import table that follows it.
+         *
+         * With the correct counts the exports read exactly as they should:
+         * module_start -> 0x000183AC (matching e_entry), module_stop ->
+         * 0x000186D8, module_info -> 0x00092558 (the address of the
+         * .rodata.sceModuleInfo section). Three independent confirmations. */
+        uint8_t  ent_len = d[off + 0x08];
         uint8_t  nvar    = d[off + 0x09];
+        uint16_t nfunc   = rd16(d + off + 0x0A);
         uint32_t table   = rd32(d + off + 0x0C);
 
         /* The table is (nfunc+nvar) NIDs followed by (nfunc+nvar) addresses.
@@ -573,11 +593,16 @@ int psp_collect_exports(const uint8_t *d, size_t len,
         size_t addrs = (size_t)(uint32_t)(table + load_bias) + (size_t)total * 4;
         if (addrs + (size_t)nfunc * 4 > len) continue;
 
-        for (uint8_t i = 0; i < nfunc; i++) {
+        for (uint16_t i = 0; i < nfunc; i++) {
             uint32_t fn = rd32(d + addrs + (size_t)i * 4);
             if (found < max) out[found] = fn;
             found++;
         }
+
+        /* Honour entLen for the stride rather than assuming 16 bytes. */
+        uint32_t stride = ent_len ? (uint32_t)ent_len * 4 : 0x10;
+        if (stride < 0x10) break;
+        e += stride;
     }
     return found;
 }
