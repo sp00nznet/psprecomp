@@ -1436,3 +1436,40 @@ Falsified with evidence, so they are not retried: VFPU garbage, lost structure
 writes, PRX relocations (twice, from two directions), a clobbered `$s0`,
 broken construction, "a consumer running too early", and a garbage argument to
 `0x000743F0` that turned out to be a stale register at a split continuation.
+
+## module_start begins with two configuration calls
+
+```
+000183AC  addiu $sp, $sp, -16
+000183B0  lui   $a2, 0x206
+000183BC  ori   $a0, $a2, 0x10        ; a0 = 0x02060010
+000183C8  jal   0x00091F1C
+000183D0  lui   $a1, 0x3
+000183D8  ori   $a0, $a1, 0x303       ; a0 = 0x00030303
+000183D4  jal   0x00091F34
+```
+
+The very first thing the module does is call `0x00091F1C` with `0x02060010` --
+a value with the shape of a size or a memory-configuration word (~33.8 MB),
+not a pointer. A second call to `0x00091F34` follows with `0x00030303`.
+
+These run before anything else, which is where heap configuration would live.
+Both are worth reading before assuming the heap is set up elsewhere: if
+`0x00091F1C` is what establishes the region the allocator later draws from,
+then whether it succeeds determines everything downstream, and it is two
+instructions into the program rather than five levels deep.
+
+## Where to resume
+
+The allocator (`0x0000E0AC` -> `0x0000E4DC`) is a real size-bucketed
+implementation -- dlmalloc-shaped, rounding to 16 bytes -- so it draws on heap
+state that something must populate. Three candidates, cheapest first:
+
+1. `0x00091F1C` / `0x00091F34`, called immediately from `module_start`.
+2. Whatever `_getmodreent`''s fallback returns, and whether its heap fields are
+   ever filled.
+3. `$k0`: setting it is necessary but was measured to be insufficient on its
+   own, so it is a precondition rather than the fix.
+
+The measurement that decides between them is the same one used throughout:
+watch each, see which runs, and read what it writes.
