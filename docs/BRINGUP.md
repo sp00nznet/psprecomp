@@ -2481,3 +2481,55 @@ bugs of exactly this kind exist in this toolkit.
    the current API would hide a second, shorter table.
 3. Re-run every theory falsified before the `$ra` fix. That fix invalidated an
    era of this document and one falsification has already been overturned.
+
+## Correction, and what the structure actually is
+
+`$s0` strides correctly:
+
+```
+subsystem loop #1: s0=0x0030B074  delta from s3 -31980
+subsystem loop #2: s0=0x0030B7CC  delta -30100   (+1880)
+subsystem loop #3: s0=0x0030BF24  delta -28220   (+1880)
+```
+
+Exactly 1880 per iteration, starting at `$a0`. **So the pointer arithmetic is
+right and the previous section''s "bad pointer" conclusion is withdrawn.**
+
+`$s3` is not an array base either -- it sits 20 bytes past the end of the
+17-element array and is passed to `strcmp` as its first argument. It is the
+*name being searched for*.
+
+And the region is not noise. Reading it as text:
+
+```
+/cygdrive/d/sce_prj/psp/project/hell2k/data/final_na/en/game/b02/b02_model/0.0
+```
+
+An **asset table**: seventeen 1880-byte records, each holding a resource path,
+each with a linked list at `+184` of what has been loaded for it. The earlier
+"file image is noise" reading was wrong -- four bytes were sampled where a
+string begins mid-field.
+
+## What the stall means now
+
+The game is looking up a loaded resource by name across seventeen asset slots.
+The lists are empty because nothing has been loaded yet, which is correct at
+this point in start-up -- but an empty circular list must have its head point
+at itself, and these read zero.
+
+So this is the *same* defect as the first table: a list head that was never
+made self-referential. The constructor pass fixed that for one family of lists
+and does not cover this one.
+
+Two candidates, in order:
+
+1. These records are initialised when their asset is first touched, by a
+   routine start-up has not reached -- making this downstream again.
+2. Their initialiser is a constructor in a table `psp_ctors_find` did not
+   return, since it yields only the longest candidate.
+
+The second is cheap to settle and the API flaw is already recorded.
+
+Note the game reaches resource lookup at all: it has run far enough to ask for
+`b02_model`. That is considerably further than any earlier point in this
+document.
