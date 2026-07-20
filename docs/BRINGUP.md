@@ -2231,3 +2231,42 @@ of work and it is the first thing to do next.
    `0x000122B4` is the comparison; `$s3` is the sought name.
 3. Re-run the theories falsified before the `$ra` fix -- that fix invalidated an
    era of this document''s conclusions, and one has already been overturned.
+
+## State after the constructors run
+
+The eight constructors are all properly recompiled (`psp_body_003B2AF8`,
+`003B2B40`, `003B2B7C`, `003B2FCC` all exist), and the analysis extent covers
+the whole image -- the `0x00091E54` bound that `dis` enforces is a section
+bound, not the analysis extent. So they are real functions and they execute.
+
+The new stall is a circular-list walk:
+
+```
+00067E6C  lw   $s1, 4($s1)             ; next
+00067E90  addiu $v0, $s0, 184          ; sentinel = s0 + 184
+00067E94  bnel $s1, $v0, 0x00067E58    ; loop until back at the sentinel
+```
+
+with the string compare reading garbage:
+
+```
+bad read8 at 0x32FEDBDB (last fn 0x000122B4)
+```
+
+`$s1` is following uninitialised memory, so `s1 + 12` is not a string. Another
+list whose head at `s0 + 184` was never made self-referential -- the same class
+of defect the static constructors fixed elsewhere, on a structure they do not
+cover.
+
+Two readings, and they are cheaply distinguishable:
+
+1. **Ordering.** The host runs the constructors *before* `module_start`, but
+   crt0 runs them after the C runtime is up. A constructor that allocates or
+   depends on runtime state would behave differently. Worth testing by running
+   them later, or by finding where the game itself expects them.
+2. **Coverage.** Discovery reaches only **14.18% of .text**. If the routine that
+   initialises this list was never discovered, it cannot be called. That number
+   has been visible all session and never questioned; it deserves to be.
+
+Reading 2 is the more troubling one and is cheap to check: confirm whether a
+function initialising `s0 + 184` exists in the generated output at all.
