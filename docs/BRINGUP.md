@@ -4056,3 +4056,44 @@ or make a tail jump between bodies carry the frame correctly. The call-site
 checker (`PSP_SP_CALL`) stays as a regression guard: it found this in one run
 after the per-body check could not see it, and it will catch any recurrence
 immediately.
+
+### How the frame is lost
+
+`psp_body_0000E4DC` ends this way:
+
+```c
+    /* 0000EA14  lw   $v0, 4($s0) */
+    r_v0 = psp_read32(r_s0 + 4);
+    /* falls through into the next function */
+    psp_func_0000EA18();
+}
+```
+
+The body opens with `addiu $sp, $sp, -32` and ends by **falling through** into
+`0x0000EA18` -- 1,340 bytes further on -- and then returning. Its own epilogue
+is never reached on this path; whatever restores the frame lives beyond the
+fall-through, and the chain evidently does not get there.
+
+This is the fall-through emission working exactly as designed, and being wrong
+here. That mechanism was added earlier in this session to fix 1,548 silently
+truncated functions, and it does fix them -- but it converts a fall-through
+into a *nested C call*, so the callee''s eventual `return` unwinds to the
+caller''s frame rather than continuing in the original one. When the epilogue
+lives past that boundary, the frame it was meant to close is already gone.
+
+So the defect is a consequence of a fix, which is worth stating plainly: the
+fall-through change was necessary and correct in what it addressed, and it
+introduced this. Both can be true.
+
+### The fix has a shape
+
+A fall-through is not a call and should not be emitted as one. The target
+should be entered as a *continuation* -- a `goto` into the same C function
+where the bodies allow it, or a tail-call that does not add a frame. The
+entry-address plumbing needed already exists: every body takes `_entry`, and
+interior labels are dispatchable, so a merged body indexed by entry address is
+reachable without new machinery.
+
+That is the next change, and the call-site checker will confirm it: the four
+violations should go to zero, and the -48 that has been measured three ways
+should disappear with them.
