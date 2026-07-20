@@ -530,6 +530,7 @@ static void emit_function(ectx *c, const a_func *fn) {
         fprintf(f, "    goto L_%08X;\n", fn->addr);
     }
 
+    int last_terminal = 0;
     for (uint32_t a = fn->start; a < fn->end; a += 4) {
         if (!owned_by(an, a, owner)) continue;
         uint32_t i = widx(an, a);
@@ -539,6 +540,8 @@ static void emit_function(ectx *c, const a_func *fn) {
         a_decode(fetch(an, a), a, &in);
 
         if (c->is_label[i]) fprintf(f, "L_%08X:\n", a);
+        last_terminal = in.is_return || in.is_indirect ||
+                        (in.is_jump && !in.is_call);
         comment(c, &in);
 
         /* The delay-slot instruction, if this transfers control. */
@@ -636,8 +639,28 @@ static void emit_function(ectx *c, const a_func *fn) {
         emit_simple(c, &in, "    ");
     }
 
-    /* Falling off the end happens when discovery lost the trail; returning is
-     * the only sane thing left, and the dispatch miss counter will show it. */
+    /* Fall-through into the next function.
+     *
+     * The walk stops when it reaches another function's entry, which is right
+     * for a tail call but also happens when code simply *runs into* the next
+     * function -- there is no instruction marking the boundary, only the fact
+     * that something else calls that address. Ending the C function there
+     * silently converts the fall-through into a return, and the caller
+     * continues as though the second half never ran.
+     *
+     * That is invisible: no dispatch miss, no bad memory access, just less
+     * work done. It got worse as discovery split more aggressively, which is
+     * how it surfaced -- reach went *down* while every other measure improved.
+     *
+     * So if the last instruction emitted could fall through, and the address
+     * after this function is another function's entry, continue there. */
+    if (!last_terminal) {
+        uint32_t next = fn->end;
+        if (is_function(an, next)) {
+            fprintf(f, "    /* falls through into the next function */\n");
+            fprintf(f, "    psp_func_%08X();\n", next);
+        }
+    }
     fprintf(f, "}\n");
 }
 
