@@ -70,6 +70,13 @@ typedef struct {
      * counts separately. */
     int scan_calls;
 
+    /* The whole loaded module image, not just .text. Jump tables live in
+     * .rodata or .data, so resolving a computed jump means reading outside the
+     * code extent. Optional: without it, tables are simply not resolved. */
+    const uint8_t *image;
+    uint32_t       image_base;
+    uint32_t       image_size;
+
     /* Output */
     a_func   *funcs;
     int       nfuncs;
@@ -77,6 +84,10 @@ typedef struct {
     int       nimports;
     uint32_t *indirects;        /* sites with an unresolved computed jump */
     int       nindirects;
+
+    /* Jump tables recovered from the `jr $rN` sites. */
+    int       ntables;          /* tables resolved */
+    int       ntable_targets;   /* total entries across them */
 
     /* Statistics over *discovered* code only — the number that matters, as
      * opposed to coverage over a whole segment that is mostly data. */

@@ -257,6 +257,162 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
     return 0;
 }
 
+/* ---- jump tables --------------------------------------------------------- */
+
+/* MIPS compiles a `switch` into a bounds check, a scaled index, a table load
+ * and an indirect jump:
+ *
+ *     sltiu $at, $key, N          bounds check -- N is the entry count
+ *     beqz  $at, default
+ *     sll   $t0, $key, 2          scale to a word index
+ *     lui   $t1, %hi(table)
+ *     addu  $t0, $t0, $t1
+ *     lw    $t0, %lo(table)($t0)  load the target
+ *     jr    $t0
+ *
+ * Recovering it means walking backward from the `jr` for the `lw` that fed it,
+ * then for the lui/addiu pair that formed the address, then for the sltiu that
+ * bounded it. The instructions may be interleaved with unrelated ones, so the
+ * search is by register rather than by position.
+ *
+ * The result is cheap to *verify*, which is what makes this safe: every entry
+ * must land inside .text, be instruction-aligned, and decode as a valid
+ * instruction. A misidentified table fails those and is rejected wholesale
+ * rather than seeding garbage.
+ */
+
+static uint32_t image_read32(const a_analysis *an, uint32_t addr) {
+    if (!an->image) return 0;
+    if (addr < an->image_base || addr + 4 > an->image_base + an->image_size) return 0;
+    const uint8_t *p = an->image + (addr - an->image_base);
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* How far back to look. A compiler keeps the whole idiom close together; a
+ * wider window mostly finds unrelated instructions that happen to match. */
+#define JT_WINDOW 24
+#define JT_MAX_ENTRIES 512
+
+static int resolve_jump_table(a_analysis *an, uint32_t site, u32list *out) {
+    if (!an->image) return 0;
+
+    a_insn jr;
+    a_decode(fetch(an, site), site, &jr);
+    const uint8_t target_reg = jr.rs;
+
+    /* Walk back for `lw target_reg, lo(base)`. */
+    uint32_t lw_addr = 0;
+    a_insn lw;
+    memset(&lw, 0, sizeof lw);
+    for (int i = 1; i <= JT_WINDOW; i++) {
+        uint32_t a = site - (uint32_t)i * 4;
+        if (!a_in_range(an, a)) break;
+        a_insn in;
+        a_decode(fetch(an, a), a, &in);
+        if (in.op == A_LW && in.rt == target_reg) { lw = in; lw_addr = a; break; }
+        /* If something else wrote the register first, this is not the idiom. */
+        if (in.op == A_ADDIU && in.rt == target_reg) return 0;
+    }
+    if (!lw_addr) return 0;
+
+    /* The lw's base is `index + tablebase`, formed by an `addu`. One operand
+     * is the scaled index (from `sll`), the other is the table address. The
+     * address itself is built as lui+addiu -- NOT as the lw's displacement,
+     * which is typically zero:
+     *
+     *     lui   $t3, %hi(table)
+     *     sll   $t0, $key, 2
+     *     addiu $t2, $t3, %lo(table)
+     *     addu  $t0, $t0, $t2
+     *     lw    $rN, 0($t0)
+     *
+     * An earlier attempt looked for the low half in the lw displacement, which
+     * is the other common form, and so matched nothing here. */
+    uint8_t cand[2];
+    int ncand = 0;
+    for (int i = 1; i <= JT_WINDOW && ncand == 0; i++) {
+        uint32_t a = lw_addr - (uint32_t)i * 4;
+        if (!a_in_range(an, a)) break;
+        a_insn in;
+        a_decode(fetch(an, a), a, &in);
+        if (in.op == A_ADDU && in.rd == lw.rs) {
+            cand[0] = in.rs;
+            cand[1] = in.rt;
+            ncand = 2;
+        }
+    }
+    if (!ncand) return 0;
+
+    /* Whichever operand traces back to an lui+addiu pair is the table base;
+     * the other is the index. */
+    uint32_t table = 0;
+    int found = 0;
+    for (int k = 0; k < 2 && !found; k++) {
+        uint8_t reg = cand[k];
+        for (int i = 1; i <= JT_WINDOW && !found; i++) {
+            uint32_t a = lw_addr - (uint32_t)i * 4;
+            if (!a_in_range(an, a)) break;
+            a_insn ai;
+            a_decode(fetch(an, a), a, &ai);
+            if (ai.op != A_ADDIU || ai.rt != reg) continue;
+
+            /* Found the low half; now the lui that set its source. */
+            for (int j = 1; j <= JT_WINDOW; j++) {
+                uint32_t b = a - (uint32_t)j * 4;
+                if (!a_in_range(an, b)) break;
+                a_insn li;
+                a_decode(fetch(an, b), b, &li);
+                if (li.op == A_LUI && li.rt == ai.rs) {
+                    table = ((uint32_t)li.imm << 16) + (uint32_t)ai.imm
+                          + (uint32_t)lw.imm;
+                    found = 1;
+                    break;
+                }
+            }
+        }
+    }
+    if (!found) return 0;
+
+    /* Bound the entry count with the sltiu, if we can find it. Without one,
+     * fall back to reading until an entry stops looking like code -- which the
+     * per-entry validation below makes safe. */
+    uint32_t limit = JT_MAX_ENTRIES;
+    for (int i = 1; i <= JT_WINDOW * 2; i++) {
+        uint32_t a = site - (uint32_t)i * 4;
+        if (!a_in_range(an, a)) break;
+        a_insn in;
+        a_decode(fetch(an, a), a, &in);
+        if (in.op == A_SLTIU && in.imm > 0 && (uint32_t)in.imm <= JT_MAX_ENTRIES) {
+            limit = (uint32_t)in.imm;
+            break;
+        }
+    }
+
+    /* Read and validate. Every entry must be code; the first that is not ends
+     * the table. A table that yields nothing valid is rejected entirely. */
+    int taken = 0;
+    for (uint32_t i = 0; i < limit; i++) {
+        uint32_t entry = image_read32(an, table + i * 4);
+        if (!a_in_range(an, entry)) break;
+
+        a_insn probe;
+        if (!a_decode(fetch(an, entry), entry, &probe) || probe.op == A_INVALID) break;
+
+        u32_push(out, entry);
+        taken++;
+    }
+
+    /* One entry is not evidence of a table -- a single plausible word turns up
+     * by chance. Two consecutive valid code pointers is a much stronger
+     * signal. */
+    if (taken < 2) {
+        out->n -= taken;
+        return 0;
+    }
+    return taken;
+}
+
 static int cmp_func(const void *a, const void *b) {
     uint32_t x = ((const a_func *)a)->addr, y = ((const a_func *)b)->addr;
     return (x > y) - (x < y);
@@ -267,6 +423,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     an->imports = NULL; an->nimports = 0;
     an->indirects = NULL; an->nindirects = 0;
     an->insns = an->vfpu = an->invalid = 0;
+    an->ntables = an->ntable_targets = 0;
     an->bytes_reached = 0;
 
     const uint32_t nwords = an->size >> 2;
@@ -316,6 +473,32 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     a_func *funcs = NULL;
     int nfuncs = 0, cap = 0;
 
+    /* Two rounds. The first walks everything reachable by control flow; the
+     * second walks whatever the jump tables reveal, which can only be resolved
+     * once the `jr` sites have been found. Tables discovered in round two are
+     * not chased further -- one level covers the switch statements a compiler
+     * actually emits, and unbounded rounds would need a fixpoint check for
+     * very little gain. */
+    for (int round = 0; round < 2; round++) {
+    if (round == 1) {
+        if (!an->image || !indirects.n) break;
+        u32list targets = { 0 };
+        for (int i = 0; i < indirects.n; i++) {
+            int n = resolve_jump_table(an, indirects.v[i], &targets);
+            if (n > 0) { an->ntables++; an->ntable_targets += n; }
+        }
+        for (int i = 0; i < targets.n; i++) {
+            uint32_t t = targets.v[i];
+            if (!a_in_range(an, t)) continue;
+            uint32_t ti = word_index(an, t);
+            if (entry_map[ti]) continue;
+            entry_map[ti] = 1;
+            u32_push(&queue, t);
+        }
+        free(targets.v);
+        if (!queue.n) break;
+    }
+
     /* The queue grows as calls are found; this terminates because every
      * function entry is marked and never walked twice, and there are finitely
      * many words. */
@@ -340,6 +523,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
         }
         funcs[nfuncs++] = f;
     }
+    }   /* rounds */
 
     for (uint32_t i = 0; i < nwords; i++)
         if (seen[i] & SEEN_CODE) an->bytes_reached += 4;

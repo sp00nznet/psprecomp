@@ -477,6 +477,12 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
     an->stub_addr = e->stub_addr;
     an->stub_size = e->stub_size;
     an->scan_calls = 1;
+    /* The whole loaded segment, so jump tables in .rodata/.data can be read. */
+    if (e->nsegments) {
+        an->image      = b->data + e->seg[0].offset;
+        an->image_base = e->seg[0].addr;
+        an->image_size = e->seg[0].filesz;
+    }
 
     /* Seeds come from three places, in increasing order of how much they find:
      *
@@ -616,7 +622,8 @@ static int cmd_funcs(const char *path, int list) {
         }
     }
 
-    printf("indirect:   %d unresolved computed jumps\n", an.nindirects);
+    printf("indirect:   %d computed-jump sites; %d tables resolved -> %d targets\n",
+           an.nindirects, an.ntables, an.ntable_targets);
 
     /* The honest VFPU cost for this title: measured over discovered code, not
      * over a segment that is mostly data. */
