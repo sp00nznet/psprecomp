@@ -3292,3 +3292,39 @@ one wrong result this session, and the submodule copy is refreshed by
 `git checkout` in a way that has silently reverted edits before. Verify by
 rebuilding from clean and checking the binary contains the string, rather than
 checking the source does.
+
+## The contradiction, fully verified
+
+Every fact re-checked directly rather than inferred:
+
+```
+import stub 0x00091F14 -> psp_hle_call(0x237DBD4F)     verified in generated source
+PSP_ENTER at that stub fires                            5 times, logged
+0x237DBD4F registered -> hle_AllocPartitionMemory       verified in sysmem.c:256
+psp_hle_init -> psp_sysmem_register                     verified in hle.c:144
+fprintf on entry to hle_AllocPartitionMemory            verified in source
+that string present in the built executable             verified by scanning the .exe
+stderr unbuffered (watchdog leaves via _exit)           fixed; no change
+handler log lines                                       0
+user memory free                                        unchanged, all runs
+```
+
+The stub is entered five times and the handler it dispatches to never runs.
+Both strings are in the binary, so this is not a stale build in the ordinary
+sense -- though a stale *object file* contributing the string while an older
+`sysmem.o` is linked would satisfy every check above and remains the leading
+candidate.
+
+Ruled out along the way: buffering (stderr made unbuffered, no change), a
+wrong stub-to-NID mapping (verified in the generated file), missing
+registration (verified in both directions).
+
+### How to settle it
+
+Put a print at the top of `psp_hle_call` itself, before the lookup loop. If it
+fires, the fault is in the lookup; if it does not, the stub is not calling what
+its source says it calls, and the generated code or its build is wrong. That
+single measurement splits the remaining space in half and needs no new theory.
+
+This is a good place to hand off: the question is small, entirely inside
+psprecomp, and every surrounding fact is verified rather than assumed.
