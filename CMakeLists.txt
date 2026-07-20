@@ -35,6 +35,9 @@ add_library(psprecomp STATIC
     src/cpu.c
     src/mem.c
     src/dispatch.c
+    src/hle/hle.c
+    src/hle/sysmem.c
+    src/hle/threadman.c
 )
 
 target_include_directories(psprecomp PUBLIC

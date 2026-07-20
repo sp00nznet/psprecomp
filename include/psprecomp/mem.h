@@ -47,6 +47,17 @@ extern psp_memory psp_mem;
 int  psp_mem_init(void);
 void psp_mem_free(void);
 
+/* Map the loaded module's image.
+ *
+ * A relocatable PRX links at address 0, and the recompiled C has those
+ * addresses baked in as literals — `lui $v1, 0x9` becomes `0x00090000`. So the
+ * module's own code and data live *outside* the console's RAM window
+ * (0x08000000+) and need their own mapping at wherever the module was linked.
+ * A statically linked module already sits inside RAM and needs none of this.
+ *
+ * Call once, before loading segments. Returns 0 on success. */
+int psp_mem_map_module(uint32_t base, uint32_t size);
+
 /* Resolve a guest address to a host pointer, or NULL if unmapped.
  * `size` is the access width; a read straddling the end of a region is
  * rejected rather than silently truncated. */

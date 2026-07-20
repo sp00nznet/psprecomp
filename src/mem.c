@@ -26,9 +26,30 @@ void psp_mem_free(void) {
     psp_mem.ram = psp_mem.vram = psp_mem.scratch = NULL;
 }
 
+/* The loaded module image, for a PRX linked outside the RAM window. */
+static uint8_t *g_module;
+static uint32_t g_module_base, g_module_size;
+
+int psp_mem_map_module(uint32_t base, uint32_t size) {
+    free(g_module);
+    g_module = (uint8_t *)calloc(1, size ? size : 1);
+    if (!g_module) { g_module_size = 0; return -1; }
+    g_module_base = base;
+    g_module_size = size;
+    return 0;
+}
+
 void *psp_mem_ptr(uint32_t addr, uint32_t size) {
     /* Collapse the three cache-behaviour mirrors onto one backing store. */
     const uint32_t a = addr & PSP_ADDR_MASK;
+
+    /* Checked first: a module linked at 0 would otherwise fall through every
+     * region test and read as unmapped. */
+    if (g_module_size && a >= g_module_base && a < g_module_base + g_module_size) {
+        uint32_t off = a - g_module_base;
+        if (off + size > g_module_size) return NULL;
+        return g_module + off;
+    }
 
     if (a >= PSP_RAM_BASE && a < PSP_RAM_BASE + PSP_RAM_SIZE) {
         uint32_t off = a - PSP_RAM_BASE;

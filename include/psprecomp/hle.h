@@ -1,0 +1,111 @@
+/* psprecomp — high-level emulation of the PSP firmware.
+ *
+ * A PSP game does not touch hardware. It calls firmware entry points through
+ * an import table, and every one of those calls is identified by a **NID** —
+ * the first four bytes of SHA-1(function name), little-endian. That is a
+ * verifiable fact rather than a convention, and `tests/test_hle.c` checks it
+ * for every function registered here: a mistyped NID or a wrong name cannot
+ * survive the test.
+ *
+ * Because the surface is a library rather than hardware, it is *implemented*,
+ * not emulated. What a game needs is exactly its import table and nothing
+ * else, which `allegrexrecomp funcs` reports — so the work is bounded and
+ * knowable in advance.
+ *
+ * Calling convention is MIPS o32: arguments in $a0-$a3 then the stack, return
+ * value in $v0. Handlers take no C arguments and use psp_arg()/psp_ret().
+ */
+#ifndef PSPRECOMP_HLE_H
+#define PSPRECOMP_HLE_H
+
+#include "cpu.h"
+#include "mem.h"
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef void (*psp_hle_fn)(void);
+
+/* Register one firmware function. `name` is kept for diagnostics and is what
+ * the NID is verified against. */
+void psp_hle_register(uint32_t nid, const char *lib, const char *name, psp_hle_fn fn);
+
+/* Call a firmware function by NID. An unregistered NID reports itself by name
+ * where possible and by number otherwise, rather than failing silently. */
+void psp_hle_call(uint32_t nid);
+
+/* Look up what is registered, for reporting. Returns NULL if absent. */
+const char *psp_hle_name(uint32_t nid);
+int         psp_hle_count(void);
+
+/* Every registered entry, for the coverage report a game repo wants: which of
+ * a module's imports actually exist yet. */
+typedef struct {
+    uint32_t    nid;
+    const char *lib;
+    const char *name;
+} psp_hle_entry;
+
+const psp_hle_entry *psp_hle_entries(int *count);
+
+/* Register everything the toolkit implements. Call once at startup. */
+void psp_hle_init(void);
+
+/* ---- o32 argument access ------------------------------------------------- */
+
+/* Arguments 0-3 arrive in $a0-$a3; 4 and beyond are on the stack, at $sp+16
+ * onward. The stack slots for the register arguments exist but are not
+ * written by the caller, which is why the split is at 4 and not at 0. */
+static inline uint32_t psp_arg(int n) {
+    if (n < 4) return psp_cpu.r[PSP_REG_A0 + n];
+    return psp_read32(psp_cpu.r[PSP_REG_SP] + (uint32_t)n * 4);
+}
+
+static inline void psp_ret(uint32_t v) { psp_cpu.r[PSP_REG_V0] = v; }
+
+/* Read a NUL-terminated string out of guest memory into a host buffer.
+ * Always terminates; returns `dst`. */
+const char *psp_str(uint32_t addr, char *dst, size_t cap);
+
+/* ---- error codes --------------------------------------------------------- */
+/* Only the ones the implemented functions can actually return. Games branch on
+ * these, so returning a plausible-looking wrong value is worse than failing. */
+#define SCE_KERNEL_ERROR_OK              0
+#define SCE_KERNEL_ERROR_ERROR           0x80020001
+#define SCE_KERNEL_ERROR_NOTIMPLEMENTED  0x80020002
+#define SCE_KERNEL_ERROR_ILLEGAL_ADDR    0x80020005
+#define SCE_KERNEL_ERROR_NO_MEMORY       0x80020190
+#define SCE_KERNEL_ERROR_ILLEGAL_ATTR    0x80020191
+#define SCE_KERNEL_ERROR_UNKNOWN_UID     0x800201A2
+#define SCE_KERNEL_ERROR_ILLEGAL_MEMBLOCK 0x800201A9
+#define SCE_KERNEL_ERROR_ILLEGAL_THID    0x80020197
+#define SCE_KERNEL_ERROR_WAIT_TIMEOUT    0x800201A8
+
+/* ---- the subsystems ------------------------------------------------------ */
+
+void psp_sysmem_init(void);
+void psp_sysmem_register(void);
+void psp_sysmem_reset(void);
+
+void psp_threadman_init(void);
+void psp_threadman_register(void);
+void psp_threadman_reset(void);
+
+/* Bytes of user memory still available — the cheapest end-to-end check that
+ * the allocator is behaving. */
+uint32_t psp_sysmem_free(void);
+
+/* Raw allocation for use by other HLE subsystems (thread stacks, mostly).
+ * Returns 0 on failure. These bypass the UID table because nothing in the
+ * guest ever refers to them. */
+uint32_t psp_sysmem_alloc(uint32_t size, int from_high);
+void     psp_sysmem_release(uint32_t addr);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* PSPRECOMP_HLE_H */

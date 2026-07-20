@@ -602,6 +602,15 @@ static int cmd_funcs(const char *path, int list) {
                        nimp, nlibs);
                 for (int k = 0; k < nlibs; k++)
                     printf("  %-24s %d\n", libs[k], counts[k]);
+
+                if (list) {
+                    printf("\nimports by NID:\n");
+                    for (int k = 0; k < nlibs; k++)
+                        for (int i = 0; i < nimp; i++)
+                            if (!strcmp(imp[i].lib, libs[k]))
+                                printf("  %-24s 0x%08X  thunk 0x%08X\n",
+                                       imp[i].lib, imp[i].nid, imp[i].addr);
+                }
                 free(imp);
             }
         }
@@ -675,10 +684,27 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
     if (e.modinfo_size && psp_modinfo_parse(b.data, b.size, e.modinfo_offset, &mi) == 0)
         module = mi.name;
 
+
+    /* The import table lets each generated thunk dispatch to the HLE layer by
+     * NID instead of merely trapping. */
+    psp_import_entry *imp = NULL;
+    int nimp = 0;
+    if (e.modinfo_size) {
+        uint32_t bias = e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0;
+        nimp = psp_collect_imports(b.data, b.size, &mi, bias, NULL, 0);
+        if (nimp > 0) {
+            imp = (psp_import_entry *)malloc((size_t)nimp * sizeof *imp);
+            if (imp) nimp = psp_collect_imports(b.data, b.size, &mi, bias, imp, nimp);
+            else nimp = 0;
+        }
+    }
+
     emit_opts o;
     o.outdir = outdir;
     o.prefix = prefix ? prefix : "recomp";
     o.module = module;
+    o.imports = imp;
+    o.nimports = nimp;
 
     printf("module:     %s\n", module);
     printf("functions:  %d\n", an.nfuncs);
@@ -696,6 +722,7 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
                an.insns ? 100.0 * (double)an.vfpu / (double)an.insns : 0.0);
     }
 
+    free(imp);
     a_analysis_free(&an);
     psp_blob_free(&b);
     return rc == 0 ? 0 : 1;

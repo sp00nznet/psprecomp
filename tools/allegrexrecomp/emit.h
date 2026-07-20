@@ -15,6 +15,7 @@
 #define ALLEGREX_EMIT_H
 
 #include "analyze.h"
+#include "container.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,12 @@ typedef struct {
     const char *outdir;     /* directory to write into */
     const char *prefix;     /* file/base name, e.g. "recomp" */
     const char *module;     /* module name, for the file header comment */
+
+    /* The module's import table, so each generated thunk can dispatch to the
+     * HLE layer by NID and carry the firmware function's library and NID in a
+     * comment. Without it the thunks can only trap. */
+    const psp_import_entry *imports;
+    int                     nimports;
 } emit_opts;
 
 /* Emit <outdir>/<prefix>_funcs.c, <prefix>_funcs.h and <prefix>_imports.c.

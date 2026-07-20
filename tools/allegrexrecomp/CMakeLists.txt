@@ -12,6 +12,7 @@ add_library(allegrex_core STATIC
     keys.c
     crypto/aes.c
     crypto/cmac.c
+    crypto/sha1.c
     crypto/kirk.c
 )
 
