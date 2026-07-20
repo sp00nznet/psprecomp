@@ -529,3 +529,52 @@ Callee-saved registers are the obvious suspect. Recompiled functions share one
 global register file, so a callee that does not preserve `$s0`-`$s7` across a
 call corrupts its caller silently -- the same shape of bug as `$ra`, and one
 that the `$ra` fix does not address.
+
+## Correction: $ra does not pin the frame
+
+Last section claimed `$ra = 0x0004DBD8` identified the stalled frame as
+`0x0004DBB0`. That is weaker than stated.
+
+Fall-through between functions is emitted as `psp_func_XXXX();` -- a C call
+that deliberately does *not* set `$ra`, because no `jal` executed. Control
+therefore moves across function boundaries without updating `$ra`, and the
+value only means "somewhere at or downstream of `0x0004DBB0`, reached without
+another call". Several functions satisfy that.
+
+## The loop is emitted correctly
+
+`psp_body_0004DC1C` was the obvious candidate and it is fine:
+
+```c
+L_0004DC1C:
+    r_v0 = psp_read8(r_v1 + 12);
+    if (r_v0 == r_zero) { r_v0 = psp_slt(r_s0, (uint32_t)1026); goto L_0004DC3C; }
+    r_s0 = r_s0 + 1;
+    r_v0 = psp_slt(r_s0, (uint32_t)1026);
+    { int _c = (r_v0 != r_zero); r_v1 = r_v1 + 16; if (_c) goto L_0004DC1C; }
+```
+
+Counter increments, bound is 1026, `beql` correctly nullifies its delay slot on
+the not-taken path. `$s0 = 0x003EC37C` (4,113,276) cannot have come from this
+loop -- `psp_slt` would have ended it at 1026 -- so that value is a leftover
+from elsewhere and does **not** indicate a clobbered callee-saved register.
+
+The callee-saved theory is therefore unsupported by this evidence. It may still
+be true; this simply is not evidence for it.
+
+## Standing facts
+
+- Execution stalls at exactly 470 function entries, reproducible.
+- The stalling loop makes **no calls of any kind** -- so it lies within a single
+  `psp_body_*`, and no fall-through leaves it.
+- `$ra` is now correct and no longer garbage; that fix was real and independent.
+
+## Next
+
+Find the loop by elimination rather than inference: instrument `PSP_ENTER` to
+record the *last* body entered and have the watchdog print it, then read that
+one function's emitted C for a back-edge that calls nothing. The entry trace
+already holds this -- `0x0004DD14` was newest -- but that function was measured
+entering once and exiting immediately, so the newest *entry* is not the
+stalling *body*. A body that loops after its last call is invisible to entry
+tracing, which is the gap to close.
