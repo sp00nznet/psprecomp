@@ -1965,3 +1965,62 @@ that expects 1, the table is fine and the *caller* is wrong.
 
 That is a concrete, cheap next measurement and it does not depend on any of the
 models this document went through.
+
+## The table is untouched .bss
+
+```
+table 0x003EC384 header: +16=0x0000 +24=0x0000
+  entry 0: key=0 val=0 used=0 next=0x0000
+  entry 1: key=0 val=0 used=0 next=0x0000
+  entry 2: key=0 val=0 used=0 next=0x0000
+  entry 3: key=0 val=0 used=0 next=0x0000
+```
+
+Every field zero, `used = 0` on every entry: **nothing has ever been written to
+this table.** It is virgin `.bss` at the moment the walk spins on it.
+
+Note that `0x0004DBB0` -- the insert routine -- *is* in the entry trace. So
+inserts ran, but not into this table: they either targeted a different one or
+bailed before writing. Either way the table `0x0004DD14` walks was never
+created.
+
+`+16 = 0` is the header''s head-index, and `0x0004DD00` exits immediately when it
+equals 1. So an initialised-but-empty table has `+16 = 1`, and this one has 0 --
+the difference between "empty list" and "never created".
+
+## The remaining question, now fully specified
+
+**What writes `1` to `0x003EC384 + 16`, and why has it not run?**
+
+That is a single, searchable fact rather than a theory: a table-create routine
+that sets the head index to the terminator. It exists somewhere on the path
+that already executes, and finding it does not depend on any model this
+document proposed and later withdrew.
+
+The measurement to take first: watch writes to `0x003EC384` during the run. If
+nothing ever writes it, the create call is missing from the executed path; if
+something writes zero, that writer is the bug. `psp_mem`''s write path already
+has a hook point -- `bad_access` was added there in one edit -- so a
+watch-on-address is a small change.
+
+# Session close
+
+Achieved: a tested rasterizer, total dispatch reachability (13,682 entries),
+label-level reachability marking, loop back-edge tracing, a wall-clock
+watchdog, `$ra` assigned on every call (a real codegen bug -- 2 sites became
+9,814), bad memory accesses 28 -> 0, VFPU `vidt`/`vcst`/`viim`/`vfim`, and a
+module-id fix that removed the game''s own libc diagnostic.
+
+Not achieved: **WTF does not render.** `pixels written: 0`. The game stalls on
+the walk described above, before submitting any geometry.
+
+The methodological lessons, in the order they cost the most:
+
+1. A measurement tool that cannot distinguish "did not happen" from "could not
+   be observed" manufactures confident wrong conclusions faster than reasoning
+   does. Label marking fixed this and overturned a wrong answer on first use.
+2. Falsifications obtained before a codegen fix are not falsifications. The
+   `$ra` bug invalidated an entire era of this document''s conclusions.
+3. Derive constants from the code. A hard-coded sentinel wrongly retired a
+   correct theory for several rounds.
+4. Counters hide diagnoses. Every real finding came from logging an address.
