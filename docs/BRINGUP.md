@@ -1549,3 +1549,36 @@ The remaining question is narrow and well-posed: **which check inside
 `0x0000E0AC`/`0x0000E4DC` fails before `sbrk` is reached?** Reading the branches
 between entry and the first `jal` in `0x0000E4DC` answers it, and the offsets it
 tests on `$s4`/`$s2` name the reent fields that must be populated.
+
+## The guard chain inside the allocator
+
+```
+0000E50C  beq $a1, $zero, 0x0000E518
+0000E524  bne $v0, $zero, 0x0000E594
+0000E52C  jal 0x0000F27C              ; <- the arena/heap getter
+0000E538  beq $v0, $zero, 0x0000E99C  ; <- returns 0 -> failure path
+0000E54C  lw  $s0, 12($a0)            ; free-list head
+0000E550  beq $s0, $a0, 0x0000E5B8    ; empty list
+```
+
+`0x0000E52C` calls `0x0000F27C` and fails out to `0x0000E99C` if it returns
+zero. That is the guard the search was looking for -- the allocator asks
+`0x0000F27C` for its arena, and gives up without ever reaching `sbrk` when the
+answer is null.
+
+Two observations that constrain it further:
+
+- `0x0000F2B8` -- inside the same function region -- **does** run, and appears
+  in the successful-indirect-call log calling `0x0000E594` five times. So this
+  region executes; it is not dead code.
+- `0x0000E594` was the *original* dispatch miss that started this session,
+  before every-label-dispatchable fixed it. It is part of the allocator''s own
+  machinery, which is a satisfying closure: the first symptom seen and the
+  current one are neighbours.
+
+## Next
+
+Watch `0x0000F27C` and read its return value. It runs, so the question is
+whether it returns null and why -- and its answer is what `0x0000E538` tests.
+That single value is now the whole remaining question, and everything recorded
+in this document hangs off it.
