@@ -3114,3 +3114,38 @@ never the provider.
 Find how the heap size is declared -- module info, an export, or a known symbol
 -- and have the loader write it before entry. Then re-run: the allocation should
 reach `hle_AllocPartitionMemory`, which is implemented and has 20 MB free.
+
+## Setting the heap-size word is not sufficient
+
+Writing 16 MB (in KB) to `0x004B0174` before entry changes behaviour -- the
+spin count fell from ~3.0B to ~0.9B back-edges -- but the kernel allocator is
+still never called, and `user memory free` is unchanged at 20,840,448.
+
+Reachability of the branch targets in `0x00000290`:
+
+```
+0x00000290  REACHED
+0x000002DC  REACHED
+0x00000368  REACHED     <- the "no heap" path
+0x0000032C  REACHED
+```
+
+**All four**, including both sides of the branch. So the routine runs more than
+once and takes different paths on different calls, which means a single
+reachability answer cannot say which path the *failing* call took. Same
+limitation that has now misled this investigation three times, appearing in a
+new form: not "was it reached" but "was it reached *this way*".
+
+The `jal` at `0x000002F0` is not a label, so it cannot be marked directly. The
+measurement that would settle it is a watch on the import stub
+(`psp_import_00091F14`), which needs `PSP_ENTER` in generated import thunks --
+they do not have it. That is a small, worthwhile emitter change: **import stubs
+should be traceable like any other function.**
+
+### Standing conclusion
+
+The heap-size word being zero is real and is a genuine loader gap. It is
+evidently not the *only* thing gating the allocation, since supplying it did
+not produce a kernel call. The next step is to make import calls observable and
+then re-read this path -- guessing further without that is how the last several
+wrong turns happened.
