@@ -3530,3 +3530,33 @@ instrumentation that could not observe what it claimed to measure -- a watch on
 a non-entry address, a mark that says "reached" without saying how, a grep for
 a log line untraceable stubs could never emit, and a `printf` placed after an
 early return. Verify the instrument before trusting the negative.
+
+### Traced: both arguments are garbage at the call site
+
+```
+strcpy BAD src=0x8E420004 dst=0xFFFFFFFF caller fn 0x00012328 ra=0x000009AC
+```
+
+The call site:
+
+```
+000009A0  addu $a1, $s2, $zero
+000009A4  jal  0x00012328        ; strcpy-family
+000009A8  addu $a0, $s1, $zero   ; delay slot
+```
+
+`$a0` comes from `$s1` and `$a1` from `$s2`, and **both are garbage** --
+`0xFFFFFFFF` and an instruction word. So this is not one mis-loaded string
+pointer: two callee-saved registers hold nonsense at the same point, in a
+function at `0x000009xx` (very low, so early start-up).
+
+Two registers wrong together points at the frame rather than at either value:
+either this function''s `$s1`/`$s2` were never loaded, or they were clobbered by
+a callee that failed to preserve them. Recompiled functions share one global
+register file, so a callee that does not restore `$s0`-`$s7` corrupts its
+caller silently -- the same shape as `$ra`, and a hypothesis raised early in
+this document that was never properly tested.
+
+That is the thread to pull next, and it is testable directly: watch this
+function''s entry, record `$s1`/`$s2`, then watch again at `0x000009A0` and see
+whether they changed across the intervening calls.
