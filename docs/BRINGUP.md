@@ -2024,3 +2024,37 @@ The methodological lessons, in the order they cost the most:
 3. Derive constants from the code. A hard-coded sentinel wrongly retired a
    correct theory for several rounds.
 4. Counters hide diagnoses. Every real finding came from logging an address.
+
+## The shim does not help: it is not one table
+
+Marking a demonstrably virgin table as empty at `0x0004DCF8`:
+
+```
+shim: marked virgin table 0x003EC384 empty
+last loop back-edge: 0x0004DD14 (6,997,249,880 hits)
+pixels written: 0
+```
+
+The shim fires once and the spin continues at the same rate. The back-edge
+address is shared by every walk, so this is consistent with the earlier
+single-table patch that merely revealed a second table: **the missing
+initialisation is systemic, not one structure.**
+
+That is the more useful reading of both experiments together. Whatever
+establishes these tables establishes many of them, in one pass, and that pass
+is what is absent. Chasing them one at a time -- by shim or by constructor --
+cannot converge.
+
+## Final state
+
+`pixels written: 0`. WTF does not render.
+
+The single question to resume on is unchanged and now better supported:
+**what creates this family of tables, and why has it not run?** It is one
+routine, it runs early, and it is missing from the executed path. The tools to
+find it exist: label marking gives yes/no reachability for any of the 13,682
+labelled addresses, and a write-watch on `0x003EC384` would name the writer
+directly if one ever appears.
+
+Do not resume by patching tables. Two experiments now show that path does not
+converge.
