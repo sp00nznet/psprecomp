@@ -4301,3 +4301,49 @@ The first fix taught that and the second case still took months of symptoms to
 find, because the metric that would have shown it -- control reaching an address
 the hardware would never reach -- was not being measured. It surfaced only by
 tracing one bad address back to the instruction that produced it.
+
+## After the interior-gap fix: what the stack checker now says
+
+```
+0x00018058: -64  (x6)      0x00063048: -64      0x00062648: -64
+0x00063964: -64            0x000180A0: -64      0x00063DB0: -64
+0x0000F48C: +32            0x0000F4A0: +32
+```
+
+The `+32` pair is the shared epilogue from the case that motivated the fix, and
+it is **correct**: `0x0000F4A0` is an epilogue-only body, so calling it raises
+`$sp` by the 32 its caller's prologue took. The frame closes exactly once, in
+the right place. A checker that flags this is measuring the body rather than the
+frame, which was already recorded as a limitation.
+
+The `-64` group is new and is not explained. Those functions consume 64 bytes
+and do not return them, and they appear only now that execution reaches them.
+
+## Where the object pointer goes wrong
+
+`0x00000914` is called four times from the same site (`ra=0x00074450`) with:
+
+```
+#1 a0=0x00834000   #2 a0=0x00000000   #3 a0=0x00000030   #4 a0=0x00000060
+```
+
+`$a0` is `$s1`, which the enclosing function sets to `0x003FD060` via
+`lui $s1, 0x40; addiu $s1, $s1, -12192`. None of the observed values match, and
+`0x30`/`0x60` are 48 and 96 -- the loop's stride applied to a starting value of
+**zero**.
+
+So `$s1` is zero when the loop begins, not `0x003FD060`. Either the instructions
+that set it are not being reached on the path taken, or the value is lost across
+a call. The `-64` stack leaks above are the obvious suspect: a callee that
+leaves `$sp` low makes every callee-saved restore in its caller read the wrong
+slot, which produces exactly this -- a register that is plausibly wrong rather
+than obviously garbage.
+
+### Next
+
+Start at `0x00018058`, the most frequent `-64` leak, and read its emitted exits
+against the original's epilogue. Given the interior-gap fix just changed how
+ownership boundaries are emitted, check specifically whether it now transfers
+out of a frame it opened without that frame ever being closed -- the fix
+mirrors what the hardware does at a *shared epilogue*, but a gap whose target is
+not an epilogue has no such guarantee.
