@@ -11,6 +11,7 @@
  */
 
 #include "psprecomp/hle.h"
+#include "psprecomp/render.h"
 #include "psprecomp/mem.h"
 #include "psprecomp/cpu.h"
 
@@ -197,6 +198,41 @@ static void test_triangle_strip(void) {
     CHECK(pixel(100, 100) == 0xFFFFFFFFu, "strip tri 1: 0x%08X", pixel(100, 100));
 }
 
+/* The backend interface itself. The software path is the reference every other
+ * backend is diffed against, so selection has to be predictable: an unknown
+ * name must not silently leave you rendering into nothing. */
+static void test_backend_selection(void) {
+    CHECK(psp_render_current() != NULL, "there is always a backend");
+    CHECK(strcmp(psp_render_current()->name, "software") == 0,
+          "software is the default, got %s", psp_render_current()->name);
+
+    CHECK(psp_render_select("null") == 0, "null backend selectable");
+    CHECK(strcmp(psp_render_current()->name, "null") == 0, "null is active");
+
+    /* An unknown name keeps the current backend rather than falling back to
+     * something arbitrary -- a typo should not silently change what renders. */
+    CHECK(psp_render_select("vulkan-that-does-not-exist") != 0,
+          "unknown backend rejected");
+    CHECK(strcmp(psp_render_current()->name, "null") == 0,
+          "rejected selection leaves the backend alone");
+
+    CHECK(psp_render_select(NULL) != 0, "NULL name rejected");
+
+    /* The null backend must draw nothing: it is what bring-up uses to ask
+     * "did the game request a draw" without pixels confusing the answer. */
+    psp_ge_reset();
+    clear_fb();
+    begin_list();
+    vertex(0, 10, 10, 0xFFFFFFFFu);
+    vertex(1, 60, 60, 0xFFFFFFFFu);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    CHECK(psp_ge_pixels() == 0, "null backend wrote %llu pixels",
+          (unsigned long long)psp_ge_pixels());
+
+    CHECK(psp_render_select("software") == 0, "software reselectable");
+}
+
 int main(void) {
     if (psp_mem_init() != 0) { printf("memory init failed\n"); return 1; }
     psp_cpu_reset();
@@ -209,6 +245,7 @@ int main(void) {
     test_clipping();
     test_transformed_is_skipped();
     test_triangle_strip();
+    test_backend_selection();
 
     psp_mem_free();
     printf(failures ? "raster: %d failure(s)\n" : "raster: all tests passed\n", failures);

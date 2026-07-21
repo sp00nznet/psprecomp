@@ -25,6 +25,7 @@
  */
 
 #include "psprecomp/hle.h"
+#include "psprecomp/render.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -74,7 +75,6 @@ typedef struct {
 static ge_queue g_queue[MAX_QUEUES];
 static uint32_t g_next_id;
 
-static uint64_t g_pixels;          /* pixels written, the proof of life */
 static uint64_t g_unsupported;     /* vertices in a format we do not read */
 
 /* Tracked state, and the counters that make the report worth reading. */
@@ -91,7 +91,7 @@ static struct {
 void psp_ge_reset(void) {
     memset(g_queue, 0, sizeof g_queue);
     memset(&g_ge, 0, sizeof g_ge);
-    g_pixels = 0;
+    psp_render_reset_pixels();
     g_unsupported = 0;
     g_next_id = 0x00080000u;
 }
@@ -112,7 +112,7 @@ void psp_ge_dump_stats(FILE *out) {
     if (g_ge.unknown)
         fprintf(out, "    %llu commands not individually decoded\n",
                 (unsigned long long)g_ge.unknown);
-    fprintf(out, "    pixels written: %llu\n", (unsigned long long)g_pixels);
+    fprintf(out, "    pixels written: %llu\n", (unsigned long long)psp_render_pixels());
     if (g_unsupported)
         fprintf(out, "    %llu vertices in an unsupported format (transformed, or no position)\n",
                 (unsigned long long)g_unsupported);
@@ -147,9 +147,8 @@ uint64_t psp_ge_vertex_count(void)  { return g_ge.vertices; }
 #define VT_INDEX(v)   (((v) >> 11) & 3)
 #define VT_THROUGH(v) (((v) >> 23) & 1)
 
-typedef struct { int x, y; uint32_t rgba; } ge_vertex;
 
-uint64_t psp_ge_pixels(void) { return g_pixels; }
+uint64_t psp_ge_pixels(void) { return psp_render_pixels(); }
 
 /* Size of one vertex in bytes, and the offsets within it. Components appear in
  * a fixed order (weights, texture, colour, normal, position) and each is
@@ -185,7 +184,7 @@ static int vertex_layout(uint32_t vtype, int *col_off, int *pos_off) {
 }
 
 static int read_vertex(uint32_t addr, uint32_t vtype, int col_off, int pos_off,
-                       ge_vertex *out) {
+                       psp_vertex *out) {
     out->rgba = 0xFFFFFFFFu;
     if (col_off >= 0 && VT_COLOR(vtype) == 7)
         out->rgba = psp_read32(addr + (uint32_t)col_off);
@@ -205,52 +204,6 @@ static int read_vertex(uint32_t addr, uint32_t vtype, int col_off, int pos_off,
     }
 }
 
-static void put_pixel(int x, int y, uint32_t rgba) {
-    if (!g_ge.fbp || !g_ge.fbw) return;
-    if (x < 0 || y < 0 || x >= 480 || y >= 272) return;
-    psp_write32(g_ge.fbp + (uint32_t)(y * (int)g_ge.fbw + x) * 4, rgba);
-    g_pixels++;
-}
-
-/* Barycentric triangle fill. Integer edge functions, so a shared edge belongs
- * to exactly one triangle and adjacent geometry neither double-draws nor
- * leaves seams. */
-static void raster_tri(const ge_vertex *a, const ge_vertex *b, const ge_vertex *c) {
-    int minx = a->x < b->x ? (a->x < c->x ? a->x : c->x) : (b->x < c->x ? b->x : c->x);
-    int maxx = a->x > b->x ? (a->x > c->x ? a->x : c->x) : (b->x > c->x ? b->x : c->x);
-    int miny = a->y < b->y ? (a->y < c->y ? a->y : c->y) : (b->y < c->y ? b->y : c->y);
-    int maxy = a->y > b->y ? (a->y > c->y ? a->y : c->y) : (b->y > c->y ? b->y : c->y);
-
-    if (minx < 0) minx = 0;
-    if (miny < 0) miny = 0;
-    if (maxx > 479) maxx = 479;
-    if (maxy > 271) maxy = 271;
-
-    const int area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
-    if (area == 0) return;
-
-    for (int y = miny; y <= maxy; y++) {
-        for (int x = minx; x <= maxx; x++) {
-            int w0 = (b->x - a->x) * (y - a->y) - (b->y - a->y) * (x - a->x);
-            int w1 = (c->x - b->x) * (y - b->y) - (c->y - b->y) * (x - b->x);
-            int w2 = (a->x - c->x) * (y - c->y) - (a->y - c->y) * (x - c->x);
-            /* Accept either winding, so back-face orientation does not silently
-             * drop half the geometry while culling is unimplemented. */
-            int inside = (w0 >= 0 && w1 >= 0 && w2 >= 0) ||
-                         (w0 <= 0 && w1 <= 0 && w2 <= 0);
-            if (inside) put_pixel(x, y, a->rgba);
-        }
-    }
-}
-
-/* A sprite is two vertices giving opposite corners of an axis-aligned rect --
- * the PSP's 2D primitive, and how most UI is drawn. */
-static void raster_sprite(const ge_vertex *a, const ge_vertex *b) {
-    int x0 = a->x < b->x ? a->x : b->x, x1 = a->x > b->x ? a->x : b->x;
-    int y0 = a->y < b->y ? a->y : b->y, y1 = a->y > b->y ? a->y : b->y;
-    for (int y = y0; y < y1; y++)
-        for (int x = x0; x < x1; x++) put_pixel(x, y, b->rgba);
-}
 
 static void draw_prim(uint32_t type, uint32_t count) {
     if (!VT_THROUGH(g_ge.vtype)) { g_unsupported += count; return; }
@@ -260,34 +213,37 @@ static void draw_prim(uint32_t type, uint32_t count) {
     int stride = vertex_layout(g_ge.vtype, &col_off, &pos_off);
     if (!stride) { g_unsupported += count; return; }
 
-    ge_vertex v[3];
-    switch (type) {
-    case 6:   /* sprites: consecutive pairs */
-        for (uint32_t i = 0; i + 1 < count; i += 2) {
-            if (!read_vertex(g_ge.vaddr + i * (uint32_t)stride, g_ge.vtype, col_off, pos_off, &v[0])) break;
-            if (!read_vertex(g_ge.vaddr + (i + 1) * (uint32_t)stride, g_ge.vtype, col_off, pos_off, &v[1])) break;
-            raster_sprite(&v[0], &v[1]);
+    /* Decode the whole batch, then hand it to the backend in one call.
+     *
+     * Format decoding stays here rather than in each backend: the stride
+     * arithmetic and component alignment are fiddly, and duplicating them per
+     * backend means every backend is wrong in its own way. Wrong once,
+     * centrally, is at least diagnosable. */
+    enum { BATCH = 256 };
+    psp_vertex v[BATCH];
+    const psp_render_backend *be = psp_render_current();
+
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t n = count - done;
+        if (n > BATCH) n = BATCH;
+
+        /* Strips are order-dependent, so a batch boundary must overlap by two
+         * vertices or the triangle spanning it is lost. */
+        uint32_t decoded = 0;
+        for (; decoded < n; decoded++) {
+            if (!read_vertex(g_ge.vaddr + (done + decoded) * (uint32_t)stride,
+                             g_ge.vtype, col_off, pos_off, &v[decoded]))
+                break;
         }
-        break;
-    case 3:   /* triangles */
-        for (uint32_t i = 0; i + 2 < count; i += 3) {
-            for (int k = 0; k < 3; k++)
-                if (!read_vertex(g_ge.vaddr + (i + (uint32_t)k) * (uint32_t)stride,
-                                 g_ge.vtype, col_off, pos_off, &v[k])) return;
-            raster_tri(&v[0], &v[1], &v[2]);
-        }
-        break;
-    case 4:   /* triangle strip */
-        for (uint32_t i = 0; i + 2 < count; i++) {
-            for (int k = 0; k < 3; k++)
-                if (!read_vertex(g_ge.vaddr + (i + (uint32_t)k) * (uint32_t)stride,
-                                 g_ge.vtype, col_off, pos_off, &v[k])) return;
-            raster_tri(&v[0], &v[1], &v[2]);
-        }
-        break;
-    default:
-        g_unsupported += count;
-        break;
+        if (!decoded) break;
+
+        be->draw((int)type, v, (int)decoded);
+
+        if (type == 4 && decoded == BATCH && done + decoded < count)
+            done += decoded - 2;     /* strip overlap */
+        else
+            done += decoded;
     }
 }
 
@@ -364,10 +320,14 @@ static void run_list(ge_queue *q) {
         case GE_OFFSET_ADDR: q->base = arg << 8; break;
 
         case GE_VTYPE: g_ge.vtype = arg; break;
-        case GE_FBP:   g_ge.fbp = (g_ge.fbp & 0xFF000000u) | arg; break;
+        case GE_FBP:
+            g_ge.fbp = (g_ge.fbp & 0xFF000000u) | arg;
+            psp_render_current()->set_target(g_ge.fbp, g_ge.fbw, 0);
+            break;
         case GE_FBW:
             g_ge.fbw = arg & 0xFFFF;
             g_ge.fbp = (g_ge.fbp & 0x00FFFFFFu) | ((arg & 0xFF0000) << 8);
+            psp_render_current()->set_target(g_ge.fbp, g_ge.fbw, 0);
             break;
 
         case GE_VADDR: g_ge.vaddr = (q->base | (arg & 0xFFFFFF)); break;
