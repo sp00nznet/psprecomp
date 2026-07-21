@@ -133,6 +133,8 @@ uint32_t psp_sysmem_alloc(uint32_t size, int from_high) {
     b->uid = g_next_uid++;
     b->addr = addr;
     b->size = rounded;
+    fprintf(stderr, "AllocPartition -> uid 0x%X at 0x%08X size %u (ends 0x%08X)\n",
+            b->uid, b->addr, b->size, b->addr + b->size);
     b->used = 1;
     snprintf(b->name, sizeof b->name, "internal");
     return addr;
@@ -146,8 +148,7 @@ void psp_sysmem_release(uint32_t addr) {
 /* ---- the calls ----------------------------------------------------------- */
 
 static void hle_AllocPartitionMemory(void) {
-    fprintf(stderr, "AllocPartitionMemory: part=%u name=0x%08X type=%u size=%u attr=0x%X (%u free)\n",
-            psp_arg(0), psp_arg(1), psp_arg(2), psp_arg(3), psp_arg(4), psp_sysmem_free());
+
     /* (partitionid, name, type, size, addr) */
     uint32_t name_ptr = psp_arg(1);
     uint32_t type     = psp_arg(2);
@@ -189,6 +190,8 @@ static void hle_AllocPartitionMemory(void) {
     b->uid = g_next_uid++;
     b->addr = addr;
     b->size = rounded;
+    fprintf(stderr, "AllocPartition -> uid 0x%X at 0x%08X size %u (ends 0x%08X)\n",
+            b->uid, b->addr, b->size, b->addr + b->size);
     b->used = 1;
     psp_str(name_ptr, b->name, sizeof b->name);
 
@@ -204,6 +207,9 @@ static void hle_FreePartitionMemory(void) {
 
 static void hle_GetBlockHeadAddr(void) {
     mem_block *b = find_uid(psp_arg(0));
+    fprintf(stderr, "GetBlockHeadAddr(uid=0x%X) -> 0x%08X (size %u, ends 0x%08X)\n",
+            psp_arg(0), b ? b->addr : 0, b ? b->size : 0,
+            b ? b->addr + b->size : 0);
     psp_ret(b ? b->addr : 0);
 }
 

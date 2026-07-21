@@ -4186,3 +4186,47 @@ readings were measurements of a program already off its intended path.
 
 Worth stating because the stack-balance checker is still reporting 247
 violations, and they should be re-read now rather than trusted from before.
+
+## Retracted: the heap-size word was never needed
+
+An earlier section concluded the loader must supply the SDK''s heap-size
+variable at `0x004B0174`, because the game "skipped the kernel allocation
+entirely" without it. Writing it was recorded as a genuine loader gap.
+
+With the backward-jump discovery gap closed, that is measurably false:
+
+```
+                        16 MB written    8 MB written    nothing written
+AllocPartition size     15,976,448       15,976,448      15,976,448
+block address           0x08C00000       0x08C00000      0x08C00000
+bad accesses            97               97              97
+```
+
+**Identical in all three cases.** The game reaches the allocation on its own,
+requests the same size, and the word it supposedly needed changes nothing.
+
+The original observation was real -- the allocation genuinely did not happen --
+but the cause was the discovery gap, not a missing loader responsibility. The
+host hack has been removed. One less fiction between the recompiled program and
+what the hardware would do.
+
+That is the second time in this document a host-side workaround turned out to
+be compensating for a toolkit bug rather than a real gap. The pattern is worth
+naming: **when a workaround is needed to get past a symptom, it is evidence
+that the cause is not yet understood, and it should be re-tested after every
+fix rather than left in place.**
+
+## Current state
+
+```
+partition allocations   0x09FE0000 (128 KB)  and  0x08C00000 (15,976,448)
+heap                    established, in range
+GE                      3 lists, 255 commands (sceGuInit reset)
+dispatch misses         18 -- all null vtable dispatches at 0x00066C6C
+bad accesses            97 -- addresses past the top of RAM (0x0A000000)
+stall                   0x00067E58, the asset-record lookup
+```
+
+The bad addresses are the next thread: `0x0A833D68`, `0x13FFFAA8`,
+`0x31BDFD10` -- all above the 32 MB RAM window, none from either partition
+block, so something is computing them from a wrong base.
