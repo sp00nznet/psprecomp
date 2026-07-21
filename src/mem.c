@@ -2,6 +2,7 @@
 
 #include "psprecomp/mem.h"
 #include "psprecomp/dispatch.h"
+#include "psprecomp/cpu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +29,20 @@ static void note_write(uint32_t addr, uint32_t width) {
  * without saying which one. The addresses are what identify it, and there are
  * few enough of them (28 in the current run) to simply print. */
 static void bad_access(uint32_t addr, int write, int width) {
+    /* The first one matters most: everything after it may be cascade from a
+     * register that was already wrong. Dump the whole file once. */
+    if (psp_mem_bad_access == 0) {
+        static const char *N[32] = {
+            "zero","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3",
+            "t4","t5","t6","t7","s0","s1","s2","s3","s4","s5","s6","s7",
+            "t8","t9","k0","k1","gp","sp","fp","ra" };
+        fprintf(stderr, "\n--- first bad access: %s%d at 0x%08X (last fn 0x%08X) ---\n",
+                write ? "write" : "read", width * 8, addr, psp_trace_last());
+        for (int i = 0; i < 32; i += 4)
+            fprintf(stderr, "  %-3s=0x%08X  %-3s=0x%08X  %-3s=0x%08X  %-3s=0x%08X\n",
+                    N[i], psp_cpu.r[i], N[i+1], psp_cpu.r[i+1],
+                    N[i+2], psp_cpu.r[i+2], N[i+3], psp_cpu.r[i+3]);
+    }
     if (psp_mem_bad_access < 32)
         fprintf(stderr, "psprecomp: bad %s%d at 0x%08X (last fn 0x%08X)\n",
                 write ? "write" : "read", width * 8, addr, psp_trace_last());

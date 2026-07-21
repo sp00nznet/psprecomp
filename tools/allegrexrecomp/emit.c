@@ -618,7 +618,34 @@ static void emit_function(ectx *c, const a_func *fn) {
 
     int last_terminal = 0;
     for (uint32_t a = fn->start; a < fn->end; a += 4) {
-        if (!owned_by(an, a, owner)) continue;
+        if (!owned_by(an, a, owner)) {
+            /* An interior gap: these instructions belong to another function,
+             * because discovery split this address range between two owners.
+             *
+             * Skipping them silently is wrong whenever the preceding
+             * instruction can fall through. Control then lands on whatever the
+             * *next owned* address happens to be, which is an arbitrary place
+             * further down the function -- not where the hardware would go.
+             *
+             * Observed at 0x0000F49C: the not-taken path of a `beq` should run
+             * an epilogue at 0x0000F4A0 and return, but that epilogue was owned
+             * by another body, so execution fell into 0x0000F4C0 and read
+             * memory through a register the skipped code would have set. The
+             * result was a load from 0xFFFFC840 -- a plausible-looking address
+             * produced by a base register of zero.
+             *
+             * This is the same defect as running off the end of a function into
+             * the next, which is already handled below; it just happens in the
+             * middle. Transfer control explicitly and stop emitting: everything
+             * after the gap is reachable through its own entry. */
+            if (!last_terminal) {
+                fprintf(f, "    /* falls into 0x%08X, owned by another function */\n", a);
+                emit_static_call(c, a);
+                fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", a);
+                last_terminal = 1;
+            }
+            continue;
+        }
         uint32_t i = widx(an, a);
         if (c->is_slot[i]) continue;             /* emitted with its branch */
 

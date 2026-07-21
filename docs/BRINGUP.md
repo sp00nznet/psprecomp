@@ -4230,3 +4230,74 @@ stall                   0x00067E58, the asset-record lookup
 The bad addresses are the next thread: `0x0A833D68`, `0x13FFFAA8`,
 `0x31BDFD10` -- all above the 32 MB RAM window, none from either partition
 block, so something is computing them from a wrong base.
+
+---
+
+# Interior gaps: 1,351 places where control silently went sideways
+
+Chasing the first bad access -- a read from `0xFFFFC840`, which is a base
+register of zero plus a small negative offset -- found this:
+
+```
+0000F494  beq  $s0, $zero, 0x0000F4C0
+0000F498  lui  $v0, 0x3B          ; delay slot: v0 = 0x003B0000
+0000F49C  addu $v0, $zero, $zero  ; not-taken path: v0 = 0
+0000F4A0  lw   $ra, 20($sp)       ; ... epilogue ...
+0000F4B8  jr   $ra
+0000F4C0  lw   $a0, -14272($v0)   ; branch target
+```
+
+Taken: `v0 = 0x003B0000`, so the load reads `0x003AC840`. Correct.
+Not taken: `v0 = 0`, then the epilogue runs and the function returns.
+
+The emitted code skipped `0x0000F4A0`-`0x0000F4BC` entirely, because discovery
+had assigned those instructions to a **different function** -- two functions
+sharing an epilogue, which is an ordinary compiler optimisation. The emission
+loop skipped every address it did not own:
+
+```c
+for (uint32_t a = fn->start; a < fn->end; a += 4) {
+    if (!owned_by(an, a, owner)) continue;      /* silently */
+```
+
+So the not-taken path fell straight through into `L_0000F4C0` and read memory
+at `0 - 14272`. A plausible-looking address, produced by a register the skipped
+code would have set.
+
+This is the **same defect as running off the end of a function into the next**,
+which was found and fixed earlier in this document. It just happens in the
+middle, and the middle case was never considered. **1,351 sites.**
+
+## Effect
+
+```
+                        before          after
+calls dispatched        108             20,000,000  (budget exhausted)
+function entries        4,309,119,950   79,997,235
+stall                   0x00067E58      0x0000B6F0
+bad accesses            97              253,106,458
+```
+
+The entry count *fell* and the bad-access count exploded, and both are
+misleading on their own. 4.3 billion entries with 108 dispatched calls is a
+tight spin -- a handful of functions calling each other. 80 million entries with
+**20 million dispatched calls** is a program doing real work through indirect
+calls until it exhausts the budget.
+
+The bad accesses are a new failure much further along: the first is a `read8` in
+`strlen` (`0x000123C4`) on a pointer of `0x0C000137`, past the top of RAM. A
+string walk on a bad pointer generates a bad read per byte, so one wrong pointer
+in a loop accounts for the count.
+
+## The lesson, again
+
+Both halves of this defect -- end-of-function and interior -- come from the same
+assumption: that a function occupies a contiguous address range it owns
+entirely. It does not. Discovery splits ranges, compilers share epilogues, and
+any emission loop that filters by ownership has to say what happens at the
+boundary rather than skipping past it.
+
+The first fix taught that and the second case still took months of symptoms to
+find, because the metric that would have shown it -- control reaching an address
+the hardware would never reach -- was not being measured. It surfaced only by
+tracing one bad address back to the instruction that produced it.
