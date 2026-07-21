@@ -23,13 +23,22 @@ This is the same philosophy behind:
 - [PS2Recomp](https://github.com/ran-j/PS2Recomp) (PS2 → native)
 - [ps3recomp](https://github.com/sp00nznet/ps3recomp) (PS3 → native)
 
-...but for the PSP, which as far as we can find **has never had one**.
+...and for the PSP, where
+[sal063/PSP-recompilation-project](https://github.com/sal063/PSP-recompilation-project)
+got there first — same idea, offline MIPS-to-C plus a native runtime, with an
+SDL3/Vulkan backend. Worth reading if you are interested in this problem.
+
+The two differ mainly in licensing posture: that project ports GPL code from
+PPSSPP for parts of its HLE, while psprecomp keeps a hard MIT boundary and uses
+emulators only as an oracle to diff against (see
+[docs/ORACLE.md](docs/ORACLE.md)). If you want a permissively-licensed base to
+build on, that is the distinction that matters.
 
 ## Why PSP?
 
-The PSP has excellent emulation. It has no static recompiler. That gap is worth
-closing, because the PSP is a genuinely *good* recompilation target hiding
-behind a reputation for being a hard one:
+The PSP has excellent emulation and, until recently, essentially no static
+recompilation work. It is a genuinely *good* recompilation target hiding behind
+a reputation for being a hard one:
 
 - **One documented CPU.** The Allegrex is MIPS32r2. No second processor, no SPU
   swarm, no exotic addressing. MIPS is the best-understood RISC there is, and
