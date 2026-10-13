@@ -164,6 +164,131 @@ int main(void) {
 
     a_analysis_free(&an);
 
+    /* ---- fall-out past a gap: the two shapes that must not be confused ----
+     *
+     * When one body's flow runs into addresses owned by another, emission has
+     * to say what happens at the boundary. Both shapes below are ordinary
+     * compiler output, and they demand opposite answers.
+     *
+     *   0x08804000  addiu $sp,$sp,-16      A: prologue
+     *   0x08804004  sw    $ra,12($sp)      A
+     *   0x08804008  beq   $a0,$zero,0x08804020 A: branches over the gap
+     *   0x0880400C  addu  $v0,$a1,$zero    A: delay slot, the fall-out site
+     *   0x08804010  addiu $a1,$a1,1        B: another body's entry
+     *   0x08804014  ...
+     *   0x08804020  lw    $ra,12($sp)      A: the continuation, a branch target
+     *
+     * Case one: the gap ends in `jr $ra` (a shared epilogue). The hardware
+     * leaves the function inside the gap, so the continuation is dead code for
+     * this body and the emission must return -- jumping there runs instructions
+     * after a `jr $ra`.
+     *
+     * Case two: nothing in the gap transfers control, so the flow does reach
+     * the continuation, and returning instead skips the rest of the body --
+     * including, in a real function, its frame restore.
+     *
+     * The first version of this rule only looked at the gap's LAST address,
+     * which is the delay slot of the `jr` in case one, so it saw no terminator
+     * and emitted the jump: __udivdi3 returned 0xFFFFFFFFFFFFFFFF on LocoRoco.
+     * These two cases pin both halves. */
+    {
+        /* Absolute addresses, so the assertions can name them. */
+        const uint32_t A_ENTRY = BASE;          /* 0x08804000 */
+        const uint32_t B_ENTRY = BASE + 0x10u;  /* 0x08804010 */
+
+        static const uint32_t GAP_LEAVES[] = {  /* the gap ends in `jr $ra` */
+            0x27BDFFF0u, 0xAFBF000Cu, 0x10800005u, 0x00A01021u,
+            0x24A50001u, 0x03E00008u, 0x27BD0010u, 0x00000000u,
+            0x8FBF000Cu, 0x03E00008u, 0x27BD0010u,
+        };
+        static const uint32_t GAP_REACHES[] = { /* nothing leaves the gap */
+            0x27BDFFF0u, 0xAFBF000Cu, 0x10800005u, 0x00A01021u,
+            0x24A50001u, 0x00A01821u, 0x24A50002u, 0x00000000u,
+            0x8FBF000Cu, 0x03E00008u, 0x27BD0010u,
+        };
+
+        enum { NW = sizeof GAP_LEAVES / 4 };
+
+        struct { const uint32_t *code; const char *prefix; int b_words;
+                 int must_jump; } cases[] = {
+            { GAP_LEAVES,  "t_gap1", 3, 0 },   /* B is 0x10..0x1C and ends in a jr */
+            { GAP_REACHES, "t_gap2", 2, 1 },   /* B is 0x10..0x18, no terminator */
+        };
+
+        for (unsigned ci = 0; ci < sizeof cases / sizeof cases[0]; ci++) {
+            uint8_t c2[sizeof GAP_LEAVES];
+            for (size_t i = 0; i < NW; i++) {
+                c2[i * 4 + 0] = (uint8_t)(cases[ci].code[i]);
+                c2[i * 4 + 1] = (uint8_t)(cases[ci].code[i] >> 8);
+                c2[i * 4 + 2] = (uint8_t)(cases[ci].code[i] >> 16);
+                c2[i * 4 + 3] = (uint8_t)(cases[ci].code[i] >> 24);
+            }
+
+            /* Boundaries and ownership are set by hand, not discovered. The
+             * split points below are the ones discovery produced on the game --
+             * a shared tail owned by another body, and a continuation this body
+             * reaches through a branch -- and replaying them exactly is what
+             * makes the two cases deterministic rather than dependent on how
+             * this test file happens to be walked. */
+            a_analysis b;
+            memset(&b, 0, sizeof b);
+            b.code = c2;
+            b.base = BASE;
+            b.size = (uint32_t)sizeof c2;
+            b.text_size = (uint32_t)sizeof c2;
+            b.nwords = NW;
+            b.owner = (uint32_t *)malloc(NW * sizeof *b.owner);
+            for (size_t i = 0; i < NW; i++) b.owner[i] = A_NO_OWNER;
+            for (int i = 0; i < 4; i++) b.owner[i] = A_ENTRY;              /* 0x00..0x0C */
+            for (int i = 4; i < 4 + cases[ci].b_words; i++) b.owner[i] = B_ENTRY;
+            /* 0x1C stays unowned: the gap does not have to end where another
+             * body begins, and the continuation is the next address THIS body
+             * owns -- which is what the rule has to find, not the next word. */
+            for (int i = 8; i < NW; i++) b.owner[i] = A_ENTRY;             /* 0x20.. */
+
+            b.nfuncs = 2;
+            b.funcs = (a_func *)calloc(2, sizeof *b.funcs);
+            b.funcs[0].addr = A_ENTRY;
+            b.funcs[0].start = A_ENTRY;
+            b.funcs[0].end = BASE + (uint32_t)sizeof c2;
+            b.funcs[0].insns = 7;
+            b.funcs[0].has_return = 1;
+            b.funcs[1].addr = B_ENTRY;
+            b.funcs[1].start = B_ENTRY;
+            b.funcs[1].end = B_ENTRY + 4u * (uint32_t)cases[ci].b_words;
+            b.funcs[1].insns = (uint32_t)cases[ci].b_words;
+            b.funcs[1].has_return = cases[ci].must_jump ? 0 : 1;
+
+            emit_opts e2;
+            e2.outdir = ".";
+            e2.prefix = cases[ci].prefix;
+            e2.module = "synthetic";
+            CHECK(a_emit(&b, &e2) == 0, "%s: emission succeeds", cases[ci].prefix);
+
+            char path[64];
+            snprintf(path, sizeof path, "./%s_funcs.c", cases[ci].prefix);
+            char *g = slurp(path, NULL);
+            CHECK(g != NULL, "%s: generated .c is readable", cases[ci].prefix);
+            if (g) {
+                expect_contains(g, "falls into 0x08804010, owned by another function",
+                                "the boundary is named in the generated code");
+                if (cases[ci].must_jump)
+                    expect_contains(g, "fall-out lands here",
+                                    "the flow reaches the continuation, so go there");
+                else {
+                    expect_contains(g, "PSP_SP_CHECK(0x08804010u);",
+                                    "the flow leaves inside the gap, so return");
+                    CHECK(strstr(g, "fall-out lands here") == NULL,
+                          "%s: no jump past a `jr $ra` inside the gap",
+                          cases[ci].prefix);
+                }
+                free(g);
+            }
+            free(b.owner);
+            free(b.funcs);
+        }
+    }
+
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
         return 1;

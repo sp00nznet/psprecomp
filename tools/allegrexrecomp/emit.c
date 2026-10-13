@@ -639,9 +639,66 @@ static void emit_function(ectx *c, const a_func *fn) {
              * middle. Transfer control explicitly and stop emitting: everything
              * after the gap is reachable through its own entry. */
             if (!last_terminal) {
+                /* The gap runs from `a` to the next address this body owns. That
+                 * address is where the hardware lands when the fragment stops,
+                 * and it is usually the rest of THIS body -- typically its
+                 * epilogue, which is what restores $sp and the saved registers.
+                 *
+                 * Returning instead of jumping there is a silent divergence: the
+                 * frame is never popped, so the caller's `lw $ra, N($sp)` reads
+                 * the wrong slot. Measured on LocoRoco: 0x3E4 saves
+                 * $s0/$s1/$s2/$s3 and its epilogue sits at 0x450; its call loop
+                 * falls into the fragment 0x42C, the `return` skipped 0x450, and
+                 * the initialiser-table walker resumed with $s0=0x8E43F4 and
+                 * $s3=0x61368 where it expected its cursor and its end -- so its
+                 * `while (++s0 < s3)` stopped immediately and entries [10]..[99]
+                 * of the table never ran. The game then read an object-registry
+                 * pointer that only entry [29] writes, and spun 3.6 billion
+                 * times scanning the module's code as if it were that table.
+                 *
+                 * Only when the fragment can fall out of its own end, and only
+                 * when the continuation already carries a label in this body: a
+                 * fragment that ends in `jr`/`j` never falls through, and its
+                 * internal `jr $ra` reaches the caller through the same C call,
+                 * so a jump there would run the continuation at the wrong time. */
+                uint32_t cont = a;
+                while (cont < fn->end && !owned_by(an, cont, owner)) cont += 4;
+                /* Does the flow leave the function *inside* the gap?
+                 *
+                 * The gap is not opaque: the hardware runs through it address by
+                 * address, and only reaches the continuation if nothing in the
+                 * gap transfers control away. A shared epilogue is the case that
+                 * matters -- the tail of a function is routinely owned by
+                 * another body, and it ends in `jr $ra`, so the continuation
+                 * after it is *dead code* for this body.
+                 *
+                 * Checking only the last address of the gap is not enough, and
+                 * the difference is measurable. On LocoRoco, the 64-bit helpers
+                 * of libgcc fall out of 0x2DE54 into 0x2DE58, whose body is the
+                 * shared epilogue (0x2DE5C: `lw $s1`, `lw $s0`, `v0 = $a0`,
+                 * `v1 = $a2`, `jr $ra` at 0x2DE6C). The last address of that gap
+                 * is the delay slot of the `jr` (`addiu $sp, $sp, 16`), which is
+                 * not a terminator -- so the jump to the continuation at 0x2DE74
+                 * was emitted, __udivdi3/__umoddi3 continued past a `jr $ra` and
+                 * returned 0, and every 64-bit division in the game produced
+                 * garbage. Measured on the probe: 24/24 correct with the walk
+                 * below, 9/24 without it. */
+                int reaches_cont = 1;
+                for (uint32_t x = a; x < cont; x += 4) {
+                    a_insn gi;
+                    a_decode(fetch(an, x), x, &gi);
+                    if (gi.is_return || (gi.is_indirect && !gi.is_call) ||
+                        (gi.is_jump && !gi.is_call)) {
+                        reaches_cont = 0;
+                        break;
+                    }
+                }
                 fprintf(f, "    /* falls into 0x%08X, owned by another function */\n", a);
                 emit_static_call(c, a);
-                fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", a);
+                if (cont < fn->end && reaches_cont && c->is_label[widx(an, cont)])
+                    fprintf(f, "    goto L_%08X;   /* the fragment's fall-out lands here */\n", cont);
+                else
+                    fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", a);
                 last_terminal = 1;
             }
             continue;
