@@ -28,6 +28,10 @@ add_executable(test_emit test_emit.c)
 target_link_libraries(test_emit PRIVATE allegrex_core)
 add_test(NAME emit COMMAND test_emit)
 
+add_executable(test_analyze test_analyze.c)
+target_link_libraries(test_analyze PRIVATE allegrex_core)
+add_test(NAME analyze COMMAND test_analyze)
+
 add_executable(test_hle test_hle.c)
 target_link_libraries(test_hle PRIVATE psprecomp allegrex_core)
 add_test(NAME hle COMMAND test_hle)

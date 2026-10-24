@@ -336,99 +336,137 @@ static uint32_t image_read32(const a_analysis *an, uint32_t addr) {
 #define JT_WINDOW 24
 #define JT_MAX_ENTRIES 512
 
+/* The GPR an instruction writes: 0..31, -1 for none, -2 when the format is not
+ * one this classifies. Tracing a register stops at its nearest write, so this
+ * must never miss one: an unknown format ends the trace instead. */
+static int gpr_written(const a_insn *in) {
+    if (in->is_call) return in->is_indirect ? in->rd : 31;
+    switch (in->fmt) {
+    case F_RD_RS_RT: case F_RD_RT_SA: case F_RD_RT_RS: case F_RD_RS:
+    case F_RD_RT: case F_RD: case F_RD_RS_RT_SA:
+        return in->rd;
+    case F_RT_RS_IMM: case F_RT_RS_UIMM: case F_RT_IMM: case F_RT_RS_POS_SZ:
+        return in->rt;
+    case F_RT_OFF_BASE:
+        switch (in->op) {
+        case A_SB: case A_SH: case A_SW: case A_SWL: case A_SWR:
+        case A_CACHE: case A_PREF:
+            return -1;
+        default:
+            return in->rt;                  /* the loads, ll and sc */
+        }
+    case F_RT_FS:
+        return (in->op == A_MFC0 || in->op == A_CFC0 || in->op == A_MFC1 ||
+                in->op == A_CFC1 || in->op == A_MFIC) ? in->rt : -1;
+    case F_RT_VD:
+        return (in->op == A_MFV || in->op == A_MFVC) ? in->rt : -1;
+    case F_NONE: case F_RS_RT_OFF: case F_RS_OFF: case F_TARGET: case F_RS:
+    case F_RS_RT: case F_FT_OFF_BASE: case F_FD_FS_FT: case F_FD_FS:
+    case F_FS_FT: case F_OFF: case F_VD_VS_VT: case F_VD_VS: case F_VT_OFF_BASE:
+        return -1;
+    default:
+        return -2;                          /* syscall, unknown encodings */
+    }
+}
+
+/* Does control leave here for good -- `jr`, `j`, or `b` (beq $x,$x)? */
+static int ends_flow(const a_insn *in) {
+    if (in->is_call) return 0;
+    return in->is_return || in->is_indirect || in->is_jump ||
+           (in->op == A_BEQ && in->rs == in->rt);
+}
+
+/* The instructions before `from` on the straight-line path into it, nearest
+ * first, at most JT_WINDOW of them. The path ends at a call (which clobbers
+ * the temporaries), at anything gpr_written() cannot classify, and above the
+ * delay slot of an unconditional transfer, whose code cannot fall into ours. */
+static int path_back(const a_analysis *an, uint32_t from, a_insn path[JT_WINDOW]) {
+    int n = 0;
+    for (uint32_t a = from - 4; n < JT_WINDOW && a_in_range(an, a); a -= 4) {
+        if (a_in_range(an, a - 4)) {
+            a_insn prev;
+            a_decode(fetch(an, a - 4), a - 4, &prev);
+            if (ends_flow(&prev)) break;    /* `a` is its delay slot */
+        }
+        a_insn in;
+        a_decode(fetch(an, a), a, &in);
+        if (in.is_call || gpr_written(&in) == -2) break;
+        path[n++] = in;
+    }
+    return n;
+}
+
+/* The nearest write of `reg` before `from`, if the path reaches one. */
+static int def_of(const a_analysis *an, uint32_t from, uint8_t reg, a_insn *def) {
+    a_insn path[JT_WINDOW];
+    const int n = path_back(an, from, path);
+    for (int k = 0; k < n; k++)
+        if (gpr_written(&path[k]) == reg) { *def = path[k]; return 1; }
+    return 0;
+}
+
+/* Does `reg`, as read at `from`, hold an address built by `lui` alone or by
+ * `lui` + `addiu`? */
+static int const_addr(const a_analysis *an, uint32_t from, uint8_t reg, uint32_t *addr) {
+    a_insn d, hi;
+    if (!def_of(an, from, reg, &d)) return 0;
+    if (d.op == A_LUI) { *addr = (uint32_t)d.imm << 16; return 1; }
+    if (d.op == A_ADDIU && def_of(an, d.addr, d.rs, &hi) && hi.op == A_LUI) {
+        *addr = ((uint32_t)hi.imm << 16) + (uint32_t)d.imm;
+        return 1;
+    }
+    return 0;
+}
+
+/* `sltiu $x, key, N` bounding `key` before `from`, before anything rewrites
+ * `key`. 0 if there is none. */
+static uint32_t bound_of(const a_analysis *an, uint32_t from, uint8_t key) {
+    a_insn path[JT_WINDOW];
+    const int n = path_back(an, from, path);
+    for (int k = 0; k < n; k++) {
+        const a_insn *in = &path[k];
+        if (in->op == A_SLTIU && in->rs == key &&
+            in->imm > 0 && (uint32_t)in->imm <= JT_MAX_ENTRIES)
+            return (uint32_t)in->imm;
+        if (gpr_written(in) == key) return 0;
+    }
+    return 0;
+}
+
 static int resolve_jump_table(a_analysis *an, uint32_t site, u32list *out) {
     if (!an->image) return 0;
 
-    a_insn jr;
+    a_insn jr, lw, sum, sl;
     a_decode(fetch(an, site), site, &jr);
-    const uint8_t target_reg = jr.rs;
 
-    /* Walk back for `lw target_reg, lo(base)`. */
-    uint32_t lw_addr = 0;
-    a_insn lw;
-    memset(&lw, 0, sizeof lw);
-    for (int i = 1; i <= JT_WINDOW; i++) {
-        uint32_t a = site - (uint32_t)i * 4;
-        if (!a_in_range(an, a)) break;
-        a_insn in;
-        a_decode(fetch(an, a), a, &in);
-        if (in.op == A_LW && in.rt == target_reg) { lw = in; lw_addr = a; break; }
-        /* If something else wrote the register first, this is not the idiom. */
-        if (in.op == A_ADDIU && in.rt == target_reg) return 0;
-    }
-    if (!lw_addr) return 0;
-
-    /* The lw's base is `index + tablebase`, formed by an `addu`. One operand
-     * is the scaled index (from `sll`), the other is the table address. The
-     * address itself is built as lui+addiu -- NOT as the lw's displacement,
-     * which is typically zero:
+    /* Each step follows a register back to the instruction that last wrote
+     * it, rather than to the nearest instruction of the right shape: a search
+     * by shape walks past the real definition into unrelated code, and builds
+     * a table address out of whatever it finds there.
      *
-     *     lui   $t3, %hi(table)
-     *     sll   $t0, $key, 2
-     *     addiu $t2, $t3, %lo(table)
-     *     addu  $t0, $t0, $t2
-     *     lw    $rN, 0($t0)
-     *
-     * An earlier attempt looked for the low half in the lw displacement, which
-     * is the other common form, and so matched nothing here. */
-    uint8_t cand[2];
-    int ncand = 0;
-    for (int i = 1; i <= JT_WINDOW && ncand == 0; i++) {
-        uint32_t a = lw_addr - (uint32_t)i * 4;
-        if (!a_in_range(an, a)) break;
-        a_insn in;
-        a_decode(fetch(an, a), a, &in);
-        if (in.op == A_ADDU && in.rd == lw.rs) {
-            cand[0] = in.rs;
-            cand[1] = in.rt;
-            ncand = 2;
-        }
-    }
-    if (!ncand) return 0;
+     * The jump register comes from a `lw`, whose address is an `addu` of the
+     * scaled index and the table base. */
+    if (!def_of(an, site, jr.rs, &lw) || lw.op != A_LW) return 0;
+    if (!def_of(an, lw.addr, lw.rs, &sum) || sum.op != A_ADDU) return 0;
 
-    /* Whichever operand traces back to an lui+addiu pair is the table base;
-     * the other is the index. */
-    uint32_t table = 0;
-    int found = 0;
-    for (int k = 0; k < 2 && !found; k++) {
-        uint8_t reg = cand[k];
-        for (int i = 1; i <= JT_WINDOW && !found; i++) {
-            uint32_t a = lw_addr - (uint32_t)i * 4;
-            if (!a_in_range(an, a)) break;
-            a_insn ai;
-            a_decode(fetch(an, a), a, &ai);
-            if (ai.op != A_ADDIU || ai.rt != reg) continue;
+    /* One operand is the base: `lui` alone, with %lo(table) in the lw
+     * displacement, or `lui` + `addiu` with a displacement of 0. The other is
+     * the index. */
+    uint32_t base;
+    uint8_t index;
+    if (const_addr(an, sum.addr, sum.rs, &base))      index = sum.rt;
+    else if (const_addr(an, sum.addr, sum.rt, &base)) index = sum.rs;
+    else return 0;
+    const uint32_t table = base + (uint32_t)lw.imm;
 
-            /* Found the low half; now the lui that set its source. */
-            for (int j = 1; j <= JT_WINDOW; j++) {
-                uint32_t b = a - (uint32_t)j * 4;
-                if (!a_in_range(an, b)) break;
-                a_insn li;
-                a_decode(fetch(an, b), b, &li);
-                if (li.op == A_LUI && li.rt == ai.rs) {
-                    table = ((uint32_t)li.imm << 16) + (uint32_t)ai.imm
-                          + (uint32_t)lw.imm;
-                    found = 1;
-                    break;
-                }
-            }
-        }
-    }
-    if (!found) return 0;
-
-    /* Bound the entry count with the sltiu, if we can find it. Without one,
-     * fall back to reading until an entry stops looking like code -- which the
-     * per-entry validation below makes safe. */
+    /* Bound the entry count by the `sltiu` on the unscaled key, if the index
+     * is `sll key, 2` and the check is on the path. Without one, fall back to
+     * reading until an entry stops looking like code -- which the per-entry
+     * validation below makes safe. */
     uint32_t limit = JT_MAX_ENTRIES;
-    for (int i = 1; i <= JT_WINDOW * 2; i++) {
-        uint32_t a = site - (uint32_t)i * 4;
-        if (!a_in_range(an, a)) break;
-        a_insn in;
-        a_decode(fetch(an, a), a, &in);
-        if (in.op == A_SLTIU && in.imm > 0 && (uint32_t)in.imm <= JT_MAX_ENTRIES) {
-            limit = (uint32_t)in.imm;
-            break;
-        }
+    if (def_of(an, sum.addr, index, &sl) && sl.op == A_SLL && sl.sa == 2) {
+        const uint32_t n = bound_of(an, sl.addr, sl.rt);
+        if (n) limit = n;
     }
 
     /* Read and validate. Every entry must be code; the first that is not ends
@@ -484,6 +522,8 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
 
     u32list queue = { 0 }, imports = { 0 }, indirects = { 0 }, cross = { 0 };
+    u32list tabled = { 0 };     /* jr sites already counted as resolved */
+    u32list unresolved = { 0 }; /* jr sites no table was found for */
     walk_ctx ctx = { an, seen, entry_map, owner, A_NO_OWNER,
                      &queue, &imports, &indirects, &cross };
 
@@ -593,7 +633,17 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
         u32list targets = { 0 };
         for (int i = 0; i < indirects.n; i++) {
             int n = resolve_jump_table(an, indirects.v[i], &targets);
-            if (n > 0) { an->ntables++; an->ntable_targets += n; }
+            /* Every round re-walks from a clean slate and so meets, and
+             * resolves, the same sites again. Count each one once. */
+            if (n > 0 && !u32_contains(&tabled, indirects.v[i])) {
+                u32_push(&tabled, indirects.v[i]);
+                an->ntables++;
+                an->ntable_targets += n;
+            }
+            /* Resolution reads only the image, so a site that fails once
+             * fails every round: these are the unresolved sites. */
+            if (n <= 0 && !u32_contains(&unresolved, indirects.v[i]))
+                u32_push(&unresolved, indirects.v[i]);
         }
         for (int i = 0; i < cross.n; i++) u32_push(&targets, cross.v[i]);
         cross.n = 0;
@@ -671,12 +721,15 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     an->nfuncs = nfuncs;
     an->imports = imports.v;
     an->nimports = imports.n;
-    an->indirects = indirects.v;
-    an->nindirects = indirects.n;
+    /* `indirects` is emptied every round, so by now it holds nothing. */
+    an->indirects = unresolved.v;
+    an->nindirects = unresolved.n;
 
     an->owner = owner;
     an->nwords = nwords;
 
+    free(indirects.v);
+    free(tabled.v);
     free(cross.v);
     free(queue.v);
     free(seen);

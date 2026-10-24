@@ -646,8 +646,8 @@ static int cmd_funcs(const char *path, int list) {
         }
     }
 
-    printf("indirect:   %d computed-jump sites; %d tables resolved -> %d targets\n",
-           an.nindirects, an.ntables, an.ntable_targets);
+    printf("indirect:   %d tables resolved -> %d targets; %d computed jumps unresolved\n",
+           an.ntables, an.ntable_targets, an.nindirects);
 
     /* The honest VFPU cost for this title: measured over discovered code, not
      * over a segment that is mostly data. */
