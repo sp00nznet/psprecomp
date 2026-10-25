@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #ifdef _WIN32
 #  include <io.h>
@@ -123,6 +126,80 @@ static void hle_Open(void) {
     }
     fclose(f);
     psp_ret(0x80010018);              /* too many open files */
+}
+
+/* SceIoStat is 88 guest bytes, independent of the host's struct stat layout.
+ * Layout and type bits: PSPSDK src/user/pspiofilemgr_stat.h (BSD).
+ * The file-backed mount has no disc-sector metadata: st_private stays zero.
+ * Times use UTC and whole seconds; ctime is the host birth time on macOS and
+ * the host ctime elsewhere (not a promise of portable creation-time support). */
+static void stat_date(uint32_t at, time_t value) {
+    struct tm date;
+#ifdef _WIN32
+    if (gmtime_s(&date, &value) != 0) return;
+#else
+    if (!gmtime_r(&value, &date)) return;
+#endif
+    psp_write16(at,      (uint16_t)(date.tm_year + 1900));
+    psp_write16(at + 2,  (uint16_t)(date.tm_mon + 1));
+    psp_write16(at + 4,  (uint16_t)date.tm_mday);
+    psp_write16(at + 6,  (uint16_t)date.tm_hour);
+    psp_write16(at + 8,  (uint16_t)date.tm_min);
+    psp_write16(at + 10, (uint16_t)date.tm_sec);
+}
+
+static void hle_Getstat(void) {
+    uint32_t name = psp_arg(0), out = psp_arg(1);
+    char guest[512], host[1024];
+    if (!name || !out || !psp_mem_ptr(out, 88)) {
+        psp_ret(0x80010016u);  /* EINVAL; reject before any output write */
+        return;
+    }
+    unsigned n;
+    for (n = 0; n < sizeof guest; n++) {
+        const char *p = (const char *)psp_mem_ptr(name + n, 1);
+        if (!p) { psp_ret(0x80010016u); return; }
+        guest[n] = *p;
+        if (!guest[n]) break;
+    }
+    if (!n || n == sizeof guest) { psp_ret(0x80010016u); return; }
+    map_path(guest, host, sizeof host);
+#ifdef _WIN32
+    struct _stat64 st;
+    int rc = _stat64(host, &st);
+#else
+    struct stat st;
+    int rc = stat(host, &st);
+#endif
+    if (rc != 0) {
+        uint32_t error = 0x80010005u;  /* EIO for other host failures */
+        if (errno == ENOENT || errno == ENOTDIR) error = 0x80010002u;
+        else if (errno == EACCES) error = 0x8001000Du;
+        psp_ret(error);
+        return;
+    }
+#ifdef _WIN32
+    int directory = (st.st_mode & _S_IFMT) == _S_IFDIR;
+    int regular = (st.st_mode & _S_IFMT) == _S_IFREG;
+#else
+    int directory = S_ISDIR(st.st_mode);
+    int regular = S_ISREG(st.st_mode);
+#endif
+    if (!directory && !regular) { psp_ret(0x80010016u); return; }
+    for (unsigned i = 0; i < 88; i++) psp_write8(out + i, 0);
+    psp_write32(out, (directory ? 0x1000u : 0x2000u) | (st.st_mode & 0777u));
+    psp_write32(out + 4, directory ? 0x10u : 0x20u);
+    uint64_t size = (uint64_t)st.st_size;
+    psp_write32(out + 8, (uint32_t)size);
+    psp_write32(out + 12, (uint32_t)(size >> 32));
+#ifdef __APPLE__
+    stat_date(out + 16, st.st_birthtime);
+#else
+    stat_date(out + 16, st.st_ctime);
+#endif
+    stat_date(out + 32, st.st_atime);
+    stat_date(out + 48, st.st_mtime);
+    psp_ret(0);
 }
 
 static io_file *fd_arg(void) {
@@ -287,6 +364,7 @@ static void hle_Dclose(void) {
 }
 
 void psp_io_register(void) {
+    psp_hle_register(0xACE946E8, "IoFileMgrForUser", "sceIoGetstat", hle_Getstat);
     psp_hle_register(0x109F50BC, "IoFileMgrForUser", "sceIoOpen",   hle_Open);
     psp_hle_register(0x810C4BC3, "IoFileMgrForUser", "sceIoClose",  hle_Close);
     psp_hle_register(0x6A638D83, "IoFileMgrForUser", "sceIoRead",   hle_Read);

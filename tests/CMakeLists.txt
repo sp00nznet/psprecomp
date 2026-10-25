@@ -59,3 +59,19 @@ add_test(NAME raster COMMAND test_raster)
 add_executable(test_module test_module.c)
 target_link_libraries(test_module PRIVATE psprecomp)
 add_test(NAME module COMMAND test_module)
+
+# Real host metadata, but only synthetic files: no game data.
+set(io_stat_root "${CMAKE_CURRENT_BINARY_DIR}/io_stat_fixture")
+file(MAKE_DIRECTORY "${io_stat_root}/disc/subdir")
+file(WRITE "${io_stat_root}/disc/probe.txt" "ok")
+add_executable(test_io_stat test_io_stat.c)
+target_link_libraries(test_io_stat PRIVATE psprecomp)
+target_compile_definitions(test_io_stat PRIVATE PSP_TEST_IO_ROOT="${io_stat_root}")
+add_test(NAME io_stat COMMAND test_io_stat)
+if(APPLE)
+    # POSIX seek-and-write is sparse here. Windows needs explicit sparse-file
+    # APIs, so its >4 GiB coverage is not registered or claimed by this test.
+    add_test(NAME io_stat_large_file COMMAND test_io_stat --large-file)
+else()
+    message(STATUS "io_stat_large_file excluded: >4 GiB sparse fixture is macOS-only; no Windows large-file coverage")
+endif()
