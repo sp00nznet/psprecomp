@@ -788,7 +788,10 @@ static void emit_function(ectx *c, const a_func *fn) {
         a_decode(fetch(an, a), a, &in);
 
         if (c->is_label[i]) fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a);
-        last_terminal = in.is_return || in.is_indirect ||
+        /* Linking indirect calls resume after their slot. jalr $zero links
+         * nothing, even though the decoder marks every jalr as a call. */
+        last_terminal = in.is_return ||
+                        (in.is_indirect && (!in.is_call || in.rd == 0)) ||
                         (in.is_jump && !in.is_call);
         comment(c, &in);
 
