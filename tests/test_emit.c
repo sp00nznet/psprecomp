@@ -704,16 +704,20 @@ static const uint32_t JR_SLOT_WRITES_TARGET[] = {
  *  08804004  addiu $t5,$t5,8     <- delay slot: the call uses the old $t5
  *  08804008  jalr  $t0, $t1      links $t0, not $ra
  *  0880400C  nop
- *  08804010  jr    $ra
+ *  08804010  jalr  $zero, $t6    no link register
  *  08804014  nop
+ *  08804018  jr    $ra
+ *  0880401C  nop
  */
 static const uint32_t JALR_CASES[] = {
     0x01A0F809u,   /* 08804000  jalr  $t5        */
     0x25AD0008u,   /* 08804004  addiu $t5,$t5,8  */
     0x01204009u,   /* 08804008  jalr  $t0, $t1   */
     0x00000000u,   /* 0880400C  nop              */
-    0x03E00008u,   /* 08804010  jr    $ra        */
+    (14u << 21) | 9u, /* 08804010  jalr $zero,$t6 */
     0x00000000u,   /* 08804014  nop              */
+    0x03E00008u,   /* 08804018  jr    $ra        */
+    0x00000000u,   /* 0880401C  nop              */
 };
 
 /* `capture` must appear, and before `slot`, which must appear before `use`. */
@@ -728,6 +732,16 @@ static void expect_order(const char *src, const char *capture, const char *slot,
     }
 }
 
+/* Do not let a later transfer satisfy an earlier call's ordering assertion. */
+static void expect_order_before(const char *src, const char *capture, const char *slot,
+                                const char *use, const char *boundary, const char *why) {
+    const char *c = strstr(src, capture);
+    const char *end = c ? strstr(c, boundary) : NULL;
+    const char *s = c ? strstr(c, slot) : NULL;
+    const char *u = s ? strstr(s, use) : NULL;
+    CHECK(end && s && u && s < end && u < end, "%s", why);
+}
+
 static void check_indirect_target_before_slot(void) {
     uint32_t seed = BASE;
     char *src = emit_synthetic("t_jr_slot", JR_SLOT_WRITES_TARGET, 2, &seed, 1, NULL);
@@ -739,10 +753,19 @@ static void check_indirect_target_before_slot(void) {
         free(src);
     }
 
-    src = emit_synthetic("t_jalr", JALR_CASES, 6, &seed, 1, NULL);
+    src = emit_synthetic("t_jalr", JALR_CASES,
+                         (uint32_t)(sizeof JALR_CASES / sizeof JALR_CASES[0]), &seed, 1, NULL);
     if (src) {
-        expect_order(src, "uint32_t _t = r_t5;", "r_t5 = r_t5 + 8;", "psp_dispatch(_t);",
-                     "jalr captures its target before the delay slot advances it");
+        expect_order_before(src, "uint32_t _t = r_t5;", "r_t5 = r_t5 + 8;",
+                            "psp_call_guest_addr(_t, 0x08804008u);", "L_08804008:",
+                            "jalr captures its target before the slot and uses that call's helper");
+        expect_order_before(src, "uint32_t _t = r_t1;", "r_t0 = 0x08804010u;",
+                            "psp_call_guest_addr(_t, 0x08804010u);", "L_08804010:",
+                            "non-RA jalr uses its own helper and return site");
+        expect_order_before(src, "uint32_t _t = r_t6;", "/* 08804014",
+                            "psp_call_guest_addr(_t, 0x00000000u);", "L_08804018:",
+                            "zero-link jalr preserves the existing zero return-site sentinel");
+        expect_absent(src, "r_zero =", "zero-link jalr does not assign the zero register");
         expect_absent(src, "psp_dispatch(r_t5);",
                       "jalr does not read $t5 after the delay slot wrote it");
         expect_contains(src, "r_ra = 0x08804008u;", "jalr $t5 links $ra");
@@ -829,8 +852,8 @@ static void check_jr_ra_continuation(void) {
     char *src = emit_synthetic("t_jr_ra_cont", JR_RA_CONTINUATION, 16, &seed, 1, NULL);
     if (src) {
         expect_contains(src, "case 0x08804010u:", "the call's return site is a label");
-        expect_contains(src, "PSP_CALL_BEGIN(0x08804010u);",
-                        "the call records the return site it expects");
+        expect_contains(src, "psp_call_guest_fn(psp_func_08804038, 0x08804010u);",
+                        "the runtime owns the call's return-site frame");
         expect_contains(src, "if (psp_ra_is_jump(_t)) { psp_dispatch(_t); return; }",
                         "a jr $ra elsewhere is a jump, not a return");
         free(src);
@@ -859,7 +882,8 @@ static void check_link_branch_is_a_call(void) {
     char *src = emit_synthetic("t_bal", BAL_CALL, 7, &seed, 1, NULL);
     if (src) {
         expect_contains(src, "r_ra = 0x08804008u;", "bal links $ra");
-        expect_contains(src, "PSP_CALL_BEGIN(0x08804008u);", "bal calls, expecting to return after its slot");
+        expect_contains(src, "psp_call_guest_fn(psp_func_08804014, 0x08804008u);",
+                        "bal uses a runtime frame and returns after its slot");
         expect_absent(src, "08804014(); return;", "the taken path is not a tail transfer");
         expect_order(src, "PSP_CALL_END(0x08804008u);", "      } }", "r_v0 = r_zero + 1;",
                      "the code after the call follows it");
@@ -982,6 +1006,9 @@ int main(void) {
         expect_contains(hdr, "void psp_func_08804000(void);", "header declares the function");
         expect_contains(hdr, "void psp_recomp_register(void);", "header declares registration");
         expect_contains(hdr, "#define r_sp", "header defines register aliases");
+        expect_absent(hdr, "psp_frame _f", "generated bodies do not own escaping call frames");
+        expect_absent(hdr, "psp_cpu.frame =", "call scopes do not publish stack-local addresses");
+        expect_contains(hdr, "if (psp_cpu.unwind) return;", "call scopes propagate foreign unwinds");
         free(hdr);
     }
 

@@ -56,6 +56,10 @@ add_executable(test_raster test_raster.c)
 target_link_libraries(test_raster PRIVATE psprecomp)
 add_test(NAME raster COMMAND test_raster)
 
+add_executable(test_guest_calls test_guest_calls.c)
+target_link_libraries(test_guest_calls PRIVATE psprecomp)
+add_test(NAME guest_calls COMMAND test_guest_calls)
+
 add_executable(test_module test_module.c)
 target_link_libraries(test_module PRIVATE psprecomp)
 add_test(NAME module COMMAND test_module)

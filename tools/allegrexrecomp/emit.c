@@ -94,9 +94,9 @@ static void comment(ectx *c, const a_insn *in) {
 }
 
 /* Emit a call to whatever lives at a static target. */
-static void emit_static_call(ectx *c, uint32_t target) {
+static void emit_static_call(ectx *c, uint32_t target, uint32_t return_site) {
     if (is_import(c->an, target)) {
-        fprintf(c->out, "    psp_import_%08X();\n", target);
+        fprintf(c->out, "    psp_call_guest_fn(psp_import_%08X, 0x%08Xu);\n", target, return_site);
     } else if (is_function(c->an, target)) {
         /* Check the stack across the call. A callee that consumes stack and
          * does not return it corrupts every callee-saved register its caller
@@ -104,12 +104,12 @@ static void emit_static_call(ectx *c, uint32_t target) {
          * at the call site catches it wherever the imbalance actually occurs --
          * including across split bodies, where no single body owns both halves
          * of a frame and a per-body check is blind. */
-        fprintf(c->out, "    { uint32_t _spc = r_sp; psp_func_%08X();"
-                        " PSP_SP_CALL(0x%08Xu, _spc, r_sp); }\n", target, target);
+        fprintf(c->out, "    { uint32_t _spc = r_sp; psp_call_guest_fn(psp_func_%08X, 0x%08Xu);"
+                        " PSP_SP_CALL(0x%08Xu, _spc, r_sp); }\n", target, return_site, target);
     } else {
         /* Discovery did not reach it. Going through the dispatch table means
          * the failure is named at run time instead of failing to link. */
-        fprintf(c->out, "    psp_dispatch(0x%08Xu);  /* not discovered */\n", target);
+        fprintf(c->out, "    psp_call_guest_addr(0x%08Xu, 0x%08Xu);  /* not discovered */\n", target, return_site);
     }
 }
 
@@ -851,13 +851,13 @@ static void emit_function(ectx *c, const a_func *fn) {
             }
             fprintf(f, "        PSP_CALL_BEGIN(0x%08Xu);\n", a + 8);
             if (is_import(an, in.target))
-                fprintf(f, "          psp_import_%08X();\n", in.target);
+                fprintf(f, "          psp_call_guest_fn(psp_import_%08X, 0x%08Xu);\n", in.target, a + 8);
             else if (is_function(an, in.target))
-                fprintf(f, "          psp_func_%08X();\n", in.target);
+                fprintf(f, "          psp_call_guest_fn(psp_func_%08X, 0x%08Xu);\n", in.target, a + 8);
             else if (owned_by(an, in.target, owner))
-                fprintf(f, "          psp_at_%08X();\n", in.target);
+                fprintf(f, "          psp_call_guest_fn(psp_at_%08X, 0x%08Xu);\n", in.target, a + 8);
             else
-                fprintf(f, "          psp_dispatch(0x%08Xu);\n", in.target);
+                fprintf(f, "          psp_call_guest_addr(0x%08Xu, 0x%08Xu);\n", in.target, a + 8);
             fprintf(f, "        PSP_CALL_END(0x%08Xu);\n", a + 8);
             /* With the slot in another body, the walk ends here and the
              * not-taken path reaches the slot by falling out. The taken path
@@ -994,8 +994,8 @@ static void emit_function(ectx *c, const a_func *fn) {
             /* The callee's frame expects to return to a + 8; see the jr $ra
              * case. Saved and restored, because the callee sets its own. */
             fprintf(f, "    PSP_CALL_BEGIN(0x%08Xu);\n", link ? a + 8 : 0u);
-            if (in.is_indirect) fprintf(f, "    psp_dispatch(_t);\n");
-            else                emit_static_call(c, in.target);
+            if (in.is_indirect) fprintf(f, "    psp_call_guest_addr(_t, 0x%08Xu);\n", link ? a + 8 : 0u);
+            else                emit_static_call(c, in.target, a + 8);
             fprintf(f, "    PSP_CALL_END(0x%08Xu);\n", link ? a + 8 : 0u);
             if (in.is_indirect) fprintf(f, "    }\n");
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
@@ -1011,8 +1011,8 @@ static void emit_function(ectx *c, const a_func *fn) {
              * `return`, that leaves the whole frame early with its stack still
              * allocated. WTF's decompressor at 0x000824D0 does exactly this,
              * across a dozen split bodies, and the 896 bytes it leaked
-             * corrupted the heap. Every call pushes the return site it
-             * expects (PSP_CALL_BEGIN), and psp_ra_is_jump() decides: a
+             * corrupted the heap. The runtime helper pushes the return site
+             * each call expects, and psp_ra_is_jump() decides: a
              * return, a return past nested calls (unwound by PSP_CALL_END),
              * or a jump, which goes through dispatch in tail position like any
              * other cross-body transfer.
@@ -1145,12 +1145,12 @@ static void emit_header(FILE *f, const ectx *c, const emit_opts *o) {
         "\n"
         "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
         "\n"
-        "/* A guest call: push the return site it expects, and after it returns,\n"
-        " * stop an unwind aimed here or pass on one aimed further out. */\n"
-        "#define PSP_CALL_BEGIN(r) { psp_frame _f; _f.ret = (r); _f.prev = psp_cpu.frame;"
-        " psp_cpu.frame = &_f;\n"
-        "#define PSP_CALL_END(r) psp_cpu.frame = _f.prev; if (psp_cpu.unwind) {"
-        " if (psp_cpu.unwind == (r)) psp_cpu.unwind = 0; else return; } }\n"
+        "/* The runtime call helper owns the guest return-site frame. Keeping\n"
+        " * its address out of this body permits terminal sibling calls even\n"
+        " * when the body also makes ordinary guest calls. Propagate only an\n"
+        " * unwind aimed further out; the helper consumes its own return site. */\n"
+        "#define PSP_CALL_BEGIN(r) {\n"
+        "#define PSP_CALL_END(r) if (psp_cpu.unwind) return; }\n"
         "\n"
         "/* Build with -DPSPRECOMP_TRACE to record every function entry. Costs\n"
         " * one store per call when on, and nothing at all when off. A dispatch\n"

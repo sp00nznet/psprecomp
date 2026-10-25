@@ -190,6 +190,32 @@ void psp_call_from_host(uint32_t addr) {
     psp_cpu.unwind = 0;              /* no unwind crosses a host frame */
 }
 
+/* Do not inline these into an emitted body, including with LTO: publishing a
+ * body-local frame through psp_cpu.frame inhibits its sibling-call optimization. */
+#if defined(_MSC_VER)
+#  define CALL_FRAME_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#  define CALL_FRAME_NOINLINE __attribute__((noinline))
+#else
+#  define CALL_FRAME_NOINLINE
+#endif
+
+CALL_FRAME_NOINLINE void psp_call_guest_fn(psp_fn_t fn, uint32_t return_site) {
+    psp_frame f = { return_site, psp_cpu.frame };
+    psp_cpu.frame = &f;
+    fn();
+    psp_cpu.frame = f.prev;
+    if (psp_cpu.unwind == return_site) psp_cpu.unwind = 0;
+}
+
+CALL_FRAME_NOINLINE void psp_call_guest_addr(uint32_t addr, uint32_t return_site) {
+    psp_frame f = { return_site, psp_cpu.frame };
+    psp_cpu.frame = &f;
+    psp_dispatch(addr);
+    psp_cpu.frame = f.prev;
+    if (psp_cpu.unwind == return_site) psp_cpu.unwind = 0;
+}
+
 int psp_ra_is_jump(uint32_t ra) {
     const psp_frame *f = psp_cpu.frame;
     if (!f || !f->ret || ra == f->ret) return 0;
