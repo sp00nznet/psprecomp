@@ -59,3 +59,8 @@ add_test(NAME raster COMMAND test_raster)
 add_executable(test_module test_module.c)
 target_link_libraries(test_module PRIVATE psprecomp)
 add_test(NAME module COMMAND test_module)
+
+add_executable(test_ctrl_latch test_ctrl_latch.c)
+target_link_libraries(test_ctrl_latch PRIVATE psprecomp)
+add_test(NAME ctrl_latch COMMAND test_ctrl_latch)
+set_tests_properties(ctrl_latch PROPERTIES TIMEOUT 30)
