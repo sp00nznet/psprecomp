@@ -108,19 +108,48 @@ psp_fn_t psp_lookup(uint32_t addr) {
 static uint32_t g_trace[TRACE_DEPTH];
 static uint64_t g_trace_n;
 
-/* A one-shot hook on entry to a specific function. Bring-up repeatedly needs
- * to see the arguments to one function out of thousands, and rebuilding the
- * generated code with a printf in it is both slow and easy to leave behind. */
-static uint32_t g_watch_addr;
-static void (*g_watch_fn)(uint32_t);
+/* A hook on entry to specific functions. Bring-up repeatedly needs to see the
+ * arguments to one function out of thousands, and rebuilding the generated code
+ * with a printf in it is both slow and easy to leave behind.
+ *
+ * Several sites at once, because one is not enough to follow a chain: watching
+ * the first function hides the second, so a host re-arms from inside each
+ * callback and everything in between goes unseen. Worse, an address nobody is
+ * watching reports "not reached" exactly like a real negative. The table keeps
+ * the single-site call meaning what it always meant (set slot 0, drop the rest)
+ * and lets `_add` append independent sites. */
+static struct { uint32_t addr; void (*fn)(uint32_t); } g_watch[PSP_TRACE_WATCH_SLOTS];
+static unsigned g_watch_n;
 
 void psp_trace_watch(uint32_t addr, void (*fn)(uint32_t)) {
-    g_watch_addr = addr;
-    g_watch_fn = fn;
+    g_watch[0].addr = addr;
+    g_watch[0].fn = fn;
+    g_watch_n = 1;
 }
 
+int psp_trace_watch_add(uint32_t addr, void (*fn)(uint32_t)) {
+    if (!fn || g_watch_n >= PSP_TRACE_WATCH_SLOTS) return -1;
+    g_watch[g_watch_n].addr = addr;
+    g_watch[g_watch_n].fn = fn;
+    return (int)g_watch_n++;
+}
+
+int psp_trace_watch_count(void) { return (int)g_watch_n; }
+void psp_trace_watch_clear(void) { g_watch[0].addr = 0; g_watch[0].fn = 0; g_watch_n = 0; }
+
 void psp_trace_enter(uint32_t addr) {
-    if (addr == g_watch_addr && g_watch_fn) g_watch_fn(addr);
+    /* Slot 0 is checked exactly the way the single site used to be, so a host
+     * with one site (or none) pays the same compare and branch as before. Only
+     * a host that armed extra sites pays for the loop, and the count is
+     * snapshotted so a site added from inside a callback is observed from the
+     * next entry, not this one. */
+    unsigned n = g_watch_n;
+    if (addr == g_watch[0].addr && g_watch[0].fn) g_watch[0].fn(addr);
+    for (unsigned i = 1; i < n && i < g_watch_n; i++) {
+        if (g_watch[i].addr != addr) continue;
+        void (*fn)(uint32_t) = g_watch[i].fn;
+        if (fn) fn(addr);
+    }
     g_trace[g_trace_n % TRACE_DEPTH] = addr;
     g_trace_n++;
 }
@@ -266,21 +295,42 @@ int psp_log_indirect;
  * Marking every label closes it: any address the emitter gave a label to can
  * now be watched, and psp_trace_watch_ok() says up front whether an address is
  * observable at all. */
-static uint32_t g_mark_addr;
-static void (*g_mark_fn)(uint32_t);
 static uint8_t *g_marked;
 static uint32_t g_marked_lo, g_marked_n;
+
+/* Same slot rule as the entry watch, for the same reason: a chain of labels
+ * needs more than one observable site, and an address nobody watches is
+ * indistinguishable from an address never reached. */
+static struct { uint32_t addr; void (*fn)(uint32_t); } g_mark[PSP_TRACE_WATCH_SLOTS];
+static unsigned g_mark_n;
 
 void psp_trace_mark(uint32_t addr) {
     if (g_marked && addr >= g_marked_lo && addr - g_marked_lo < g_marked_n * 4)
         g_marked[(addr - g_marked_lo) >> 2] = 1;
-    if (addr == g_mark_addr && g_mark_fn) g_mark_fn(addr);
+    unsigned n = g_mark_n;
+    if (addr == g_mark[0].addr && g_mark[0].fn) g_mark[0].fn(addr);
+    for (unsigned i = 1; i < n && i < g_mark_n; i++) {
+        if (g_mark[i].addr != addr) continue;
+        void (*fn)(uint32_t) = g_mark[i].fn;
+        if (fn) fn(addr);
+    }
 }
 
 void psp_trace_watch_label(uint32_t addr, void (*fn)(uint32_t)) {
-    g_mark_addr = addr;
-    g_mark_fn = fn;
+    g_mark[0].addr = addr;
+    g_mark[0].fn = fn;
+    g_mark_n = 1;
 }
+
+int psp_trace_watch_label_add(uint32_t addr, void (*fn)(uint32_t)) {
+    if (!fn || g_mark_n >= PSP_TRACE_WATCH_SLOTS) return -1;
+    g_mark[g_mark_n].addr = addr;
+    g_mark[g_mark_n].fn = fn;
+    return (int)g_mark_n++;
+}
+
+int psp_trace_watch_label_count(void) { return (int)g_mark_n; }
+void psp_trace_watch_label_clear(void) { g_mark[0].addr = 0; g_mark[0].fn = 0; g_mark_n = 0; }
 
 void psp_trace_marks_init(uint32_t lo, uint32_t words) {
     free(g_marked);

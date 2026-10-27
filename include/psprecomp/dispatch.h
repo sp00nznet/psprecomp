@@ -70,7 +70,25 @@ void psp_trace_enter(uint32_t addr);
 void psp_trace_dump(void);
 void psp_trace_reset(void);
 uint32_t psp_trace_last(void);
+/* A hook on entry to specific functions.
+ *
+ * Bring-up repeatedly needs the arguments to one function out of thousands, but
+ * a single site is not enough to follow a chain: watching the first stops the
+ * observation of the second, so a host re-arms from inside each callback and
+ * everything in between goes unseen -- and an unobserved address reports "not
+ * reached" for something it simply was not watching. `_add` keeps the one-site
+ * call working exactly as before and lets a host register up to
+ * PSP_TRACE_WATCH_SLOTS independent sites instead.
+ *
+ * `psp_trace_watch` replaces the whole set with this one site, so a host that
+ * calls it after `_add` keeps only the site it just named. `_add` appends and
+ * never drops an existing site; it returns the slot, or -1 when the table is
+ * full, so a silently unobserved address cannot happen. */
+#define PSP_TRACE_WATCH_SLOTS 8
 void psp_trace_watch(uint32_t addr, void (*fn)(uint32_t));
+int  psp_trace_watch_add(uint32_t addr, void (*fn)(uint32_t));
+int  psp_trace_watch_count(void);
+void psp_trace_watch_clear(void);
 void psp_trace_loop(uint32_t addr);
 void psp_trace_mark(uint32_t addr);
 void psp_trace_sp(uint32_t fn, uint32_t sp_in, uint32_t sp_out);
@@ -99,6 +117,10 @@ typedef struct {
 int psp_sp_hist(psp_sp_site *out, int max);
 int psp_sp_call_hist(psp_sp_site *out, int max);
 void psp_trace_watch_label(uint32_t addr, void (*fn)(uint32_t));
+/* The same slots for label (non-entry) addresses; same replace/append rules. */
+int  psp_trace_watch_label_add(uint32_t addr, void (*fn)(uint32_t));
+int  psp_trace_watch_label_count(void);
+void psp_trace_watch_label_clear(void);
 void psp_trace_marks_init(uint32_t lo, uint32_t words);
 int psp_trace_was_marked(uint32_t addr);
 uint32_t psp_trace_loop_addr(void);
