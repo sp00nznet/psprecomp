@@ -591,6 +591,9 @@ static char *emit_synthetic(const char *prefix, const uint32_t *words, size_t nw
     o.outdir = ".";
     o.prefix = prefix;
     o.module = "synthetic";
+    o.imports = NULL;
+    o.nimports = 0;
+    o.hints = NULL;
     int rc = a_emit(&an, &o);
     a_analysis_free(&an);
     if (rc != 0) {
@@ -918,6 +921,9 @@ int main(void) {
     o.outdir = ".";
     o.prefix = "t_emit";
     o.module = "synthetic";
+    o.imports = NULL;
+    o.nimports = 0;
+    o.hints = NULL;
     CHECK(a_emit(&an, &o) == 0, "emission succeeds");
 
     /* The corpus is split across units. A stale monolithic file from an older
@@ -1054,6 +1060,9 @@ int main(void) {
     o2.outdir = ".";
     o2.prefix = "t_vfim";
     o2.module = "synthetic";
+    o2.imports = NULL;
+    o2.nimports = 0;
+    o2.hints = NULL;
     CHECK(a_emit(&an2, &o2) == 0, "vfim emission succeeds");
 
     char *vsrc = slurp("./t_vfim_funcs_000.c", NULL);
