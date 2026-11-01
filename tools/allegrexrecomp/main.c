@@ -14,6 +14,7 @@
 #include "decode.h"
 #include "analyze.h"
 #include "emit.h"
+#include "hints.h"
 #include "keys.h"
 #include "crypto/kirk.h"
 
@@ -33,7 +34,7 @@ static int usage(void) {
         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
         "  allegrexrecomp cover   <file>\n"
         "  allegrexrecomp funcs   <file> [--list]\n"
-        "  allegrexrecomp emit    <file> <outdir> [prefix]\n"
+        "  allegrexrecomp emit    <file> <outdir> [prefix] [--hints <path>]\n"
         "  allegrexrecomp dump    <file> <addr>\n"
         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
@@ -42,7 +43,11 @@ static int usage(void) {
         "ELF/PRX modules, and raw binaries.\n"
         "\n"
         "Key material is never bundled. Supply it via --keys, $PSPRECOMP_KEYS,\n"
-        "or ./keys/psp_keys.txt — see docs/DECRYPT.md.\n");
+        "or ./keys/psp_keys.txt — see docs/DECRYPT.md.\n"
+        "\n"
+        "emit reads an optional per-title hints file (TOML) with --hints: the\n"
+        "addresses listed under [[label]] are emitted as dispatch entries of the\n"
+        "function that owns them, for the targets no static analysis can see.\n");
     return 2;
 }
 
@@ -703,7 +708,8 @@ static int cmd_funcs(const char *path, int list) {
 
 /* ---- the emitter --------------------------------------------------------- */
 
-static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
+static int cmd_emit(const char *path, const char *outdir, const char *prefix,
+                    const char *hintspath) {
     psp_blob b;
     elf_info e;
     a_analysis an;
@@ -730,16 +736,32 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
         }
     }
 
+    /* Hints are loaded before emission and validated on the way in: a
+     * misaligned or unknown address is a typo in a file the author can fix, and
+     * saying so here beats a warning buried in the emission report. */
+    a_hints hints;
+    char err[512];
+    if (a_hints_load(hintspath, &hints, err, sizeof err) != 0) {
+        fprintf(stderr, "%s\n", err);
+        free(imp);
+        a_analysis_free(&an);
+        psp_blob_free(&b);
+        return 1;
+    }
+
     emit_opts o;
     o.outdir = outdir;
     o.prefix = prefix ? prefix : "recomp";
     o.module = module;
     o.imports = imp;
     o.nimports = nimp;
+    o.hints = hintspath ? &hints : NULL;
 
     printf("module:     %s\n", module);
     printf("functions:  %d\n", an.nfuncs);
-    printf("imports:    %d\n\n", an.nimports);
+    printf("imports:    %d\n", an.nimports);
+    if (hintspath) printf("hints:      %s (%d address(es))\n", hintspath, hints.nlabels);
+    printf("\n");
 
     int rc = a_emit(&an, &o);
 
@@ -753,6 +775,7 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
                an.insns ? 100.0 * (double)an.vfpu / (double)an.insns : 0.0);
     }
 
+    a_hints_free(&hints);
     free(imp);
     a_analysis_free(&an);
     psp_blob_free(&b);
@@ -995,7 +1018,16 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "funcs"))   return cmd_funcs(argv[2], argc > 3 && !strcmp(argv[3], "--list"));
     if (!strcmp(cmd, "emit")) {
         if (argc < 4) return usage();
-        return cmd_emit(argv[2], argv[3], argc > 4 ? argv[4] : NULL);
+        /* [prefix] [--hints <path>], in either order: the prefix stays optional
+         * so every existing command line keeps working. */
+        const char *prefix = NULL;
+        const char *hintspath = NULL;
+        for (int i = 4; i < argc; i++) {
+            if (!strcmp(argv[i], "--hints") && i + 1 < argc) { hintspath = argv[++i]; continue; }
+            if (!prefix) { prefix = argv[i]; continue; }
+            return usage();
+        }
+        return cmd_emit(argv[2], argv[3], prefix, hintspath);
     }
     if (!strcmp(cmd, "dump")) {
         if (argc < 4) return usage();

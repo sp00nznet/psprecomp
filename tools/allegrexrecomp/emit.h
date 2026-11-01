@@ -16,6 +16,7 @@
 
 #include "analyze.h"
 #include "container.h"
+#include "hints.h"
 
 #include <stdio.h>
 
@@ -33,6 +34,12 @@ typedef struct {
      * comment. Without it the thunks can only trap. */
     const psp_import_entry *imports;
     int                     nimports;
+
+    /* Per-title hints, or NULL. An address listed there is emitted as a
+     * dispatch entry of the function that owns it, which is how a hand-written
+     * routine's computed targets become reachable without the analysis having
+     * to guess them (hints.h). */
+    const a_hints *hints;
 } emit_opts;
 
 /* Emit the whole module: <prefix>_funcs.h, <prefix>_imports.c,

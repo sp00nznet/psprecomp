@@ -22,6 +22,7 @@ typedef struct {
     FILE *out;
     const a_analysis *an;
     const a_func *func;
+    const a_hints *hints;  /* forced entries from the hints file, or NULL */
     uint8_t *is_label;     /* per word, within the current function */
     uint8_t *is_slot;      /* per word: consumed as a delay slot */
     uint32_t *entries;     /* interior labels that got a dispatch thunk */
@@ -636,6 +637,19 @@ static int slot_repeatable(const a_insn *s) {
 static void mark_labels(ectx *c, const a_func *fn) {
     const a_analysis *an = c->an;
     const uint32_t owner = fn->addr;
+
+    /* Hints first: an address the game's own notes call an entry is a label
+     * before anything else looks at it. Discovery cannot see it -- a ladder of
+     * `b; move` pairs is reached by a computed jump, so nothing branches to a
+     * rung and no analysis reason exists to name one -- but the title's author
+     * knows, and this is where that knowledge enters. Marking it here rather
+     * than after the branch scan means the delay-slot pass below sees it too. */
+    if (c->hints) {
+        for (int i = 0; i < c->hints->nlabels; i++) {
+            uint32_t a = c->hints->labels[i];
+            if (owned_by(an, a, owner)) c->is_label[widx(an, a)] = 1;
+        }
+    }
 
     for (uint32_t a = fn->start; a < fn->end; a += 4) {
         if (!owned_by(an, a, owner)) continue;
@@ -1334,6 +1348,41 @@ static int out_commit(outfile *of) {
  * to dominate the build, which is the failure mode of splitting too far. */
 #define FUNCS_PER_UNIT 64
 
+/* Report every hint that cannot apply.
+ *
+ * A hint that silently does nothing is the failure mode this whole file exists
+ * to avoid: the build succeeds, the recovery looks applied, and the address
+ * still misses at runtime. Two ways an address can land nowhere -- it is not
+ * inside any discovered function (a typo, or a block discovery has not reached
+ * yet), or it is a delay slot, which is emitted inline with its branch and
+ * skipped by the switch and the thunk loop on purpose. Neither is fatal: a game
+ * repository may carry hints for code only one entry point reaches, and a
+ * recompiler that refuses to build in that case would be worse than one that
+ * says so. */
+static void report_unapplied_hints(const ectx *c) {
+    const a_analysis *an = c->an;
+    const a_hints *h = c->hints;
+
+    if (!h) return;
+
+    for (int i = 0; i < h->nlabels; i++) {
+        uint32_t a = h->labels[i];
+        const a_func *owner = NULL;
+        for (int f = 0; f < an->nfuncs && !owner; f++)
+            if (owned_by(an, a, an->funcs[f].addr)) owner = &an->funcs[f];
+
+        if (!owner) {
+            fprintf(stderr, "hints: 0x%08X is not inside any discovered function, so it "
+                            "cannot become a dispatch entry\n", a);
+            continue;
+        }
+        if (c->is_slot[widx(an, a)]) {
+            fprintf(stderr, "hints: 0x%08X is a delay slot of its function, so it is "
+                            "emitted inline with its branch and has no entry of its own\n", a);
+        }
+    }
+}
+
 int a_emit(const a_analysis *an, const emit_opts *o) {
     outfile of;
     char name[256];
@@ -1347,6 +1396,7 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
     c.out = NULL;
     c.an = an;
     c.func = NULL;
+    c.hints = o->hints;
     c.is_label = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
     c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
     c.entries = NULL;
@@ -1367,6 +1417,7 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
      * belongs to a body emitted later (#7). Done before the header, so the
      * header can declare every interior-label thunk. */
     for (i = 0; i < an->nfuncs; i++) mark_labels(&c, &an->funcs[i]);
+    report_unapplied_hints(&c);
 
     /* Header */
     snprintf(name, sizeof name, "%s_funcs.h", o->prefix);
@@ -1442,6 +1493,8 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
 
     printf("wrote %s/%s_funcs_000..%03d.c  (%d functions, %d interior entries)\n",
            o->outdir, o->prefix, nunits - 1, an->nfuncs, c.nentries);
+    if (o->hints && o->hints->nlabels)
+        printf("hints:      %d address(es) forced to entries\n", o->hints->nlabels);
     printf("wrote %s/%s_funcs.h\n", o->outdir, o->prefix);
     printf("wrote %s/%s_imports.c (%d imports)\n", o->outdir, o->prefix, an->nimports);
     printf("wrote %s/%s_register.c\n", o->outdir, o->prefix);
@@ -1481,6 +1534,7 @@ int a_emit_one(const a_analysis *an, uint32_t addr, FILE *out) {
     c.out = out;
     c.an = an;
     c.func = fn;
+    c.hints = NULL;
     c.is_label = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
     c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
     c.entries = NULL;

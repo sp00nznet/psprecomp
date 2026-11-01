@@ -59,3 +59,9 @@ add_test(NAME raster COMMAND test_raster)
 add_executable(test_module test_module.c)
 target_link_libraries(test_module PRIVATE psprecomp)
 add_test(NAME module COMMAND test_module)
+
+# The hints file: a TOML subset written by the game's author, and the entries it
+# forces into emission. Synthetic code only, like every other suite here.
+add_executable(test_hints test_hints.c)
+target_link_libraries(test_hints PRIVATE allegrex_core)
+add_test(NAME hints COMMAND test_hints)

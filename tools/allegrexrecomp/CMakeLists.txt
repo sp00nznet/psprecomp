@@ -9,6 +9,7 @@ add_library(allegrex_core STATIC
     container.c
     analyze.c
     emit.c
+    hints.c
     keys.c
     crypto/aes.c
     crypto/cmac.c
