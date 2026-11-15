@@ -512,9 +512,31 @@ static int looks_like_code(const uint8_t *d, size_t len, const elf_info *e,
     return 1;
 }
 
-int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
-                              uint32_t load_bias, uint32_t *out, int max) {
+static int seg_word_offset(const elf_info *e, uint8_t seg_idx, uint32_t load_bias,
+                           int relocated, uint32_t img_base, size_t *out_off) {
+    if (e->nsegments) {
+        if (seg_idx >= e->nsegments) return -1;
+        if (relocated) {
+            if (e->seg[seg_idx].addr < img_base) return -1;
+            *out_off = (size_t)(e->seg[seg_idx].addr - img_base);
+        } else {
+            *out_off = (size_t)e->seg[seg_idx].offset;
+        }
+        return 0;
+    }
+    *out_off = (size_t)load_bias;
+    return 0;
+}
+
+int psp_collect_pointer_seeds_at(const uint8_t *d, size_t len,
+                                 const uint8_t *img, size_t img_len,
+                                 uint32_t img_base, const elf_info *e,
+                                 uint32_t load_bias, uint32_t *out, int max) {
     if (!e->shoff || !e->shnum || !e->text_size) return 0;
+
+    const int relocated = (img != NULL);
+    const uint8_t *word_buf = relocated ? img : d;
+    const size_t word_len   = relocated ? img_len : len;
 
     const uint32_t text_lo = e->text_addr;
     const uint32_t text_hi = e->text_addr + e->text_size;
@@ -539,6 +561,20 @@ int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
         for (uint32_t r = 0; r + 8 <= size; r += 8) {
             uint32_t r_offset = rd32(d + off + r);
             uint32_t r_info   = rd32(d + off + r + 4);
+            uint8_t rtype    = (uint8_t)(r_info & 0xFF);
+            uint8_t ofsbase  = (uint8_t)((r_info >> 8) & 0xFF);
+            uint8_t addrbase = (uint8_t)((r_info >> 16) & 0xFF);
+
+            /* Multi-segment PRX relocations encode the target section/segment
+             * in ofsbase (where the word lives) and the referenced segment in
+             * addrbase (whose base address is added). Assuming segment 0 for
+             * every entry misses .data relocations (ofsbase=1) and miscomputes
+             * targets relative to segment 1 (addrbase=1). */
+            size_t ofs_base_off = 0;
+            if (seg_word_offset(e, ofsbase, load_bias, relocated, img_base, &ofs_base_off) != 0)
+                continue;
+            if (e->nsegments && addrbase >= e->nsegments) continue;
+            uint32_t addr_base_val = (!relocated && e->nsegments) ? e->seg[addrbase].addr : 0;
 
             /* HI16/LO16 pairs are how an address gets *computed in code*
              * rather than stored in a word:
@@ -552,36 +588,43 @@ int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
              * pairs, and the address is (hi << 16) + (int16)lo. The LO16 half
              * is signed, which is why it cannot simply be OR'd in: a low half
              * of 0x8000 or above borrows from the high half. */
-            if ((r_info & 0xFF) == R_MIPS_HI16 && r + 16 <= size) {
-                uint32_t lo_info = rd32(d + off + r + 12);
-                if ((lo_info & 0xFF) == R_MIPS_LO16) {
-                    uint32_t lo_offset = rd32(d + off + r + 8);
-                    size_t hi_at = (uint32_t)(r_offset + load_bias);
-                    size_t lo_at = (uint32_t)(lo_offset + load_bias);
-                    if (hi_at + 4 <= len && lo_at + 4 <= len) {
-                        uint32_t hi_imm = rd32(d + hi_at) & 0xFFFF;
-                        int32_t  lo_imm = (int16_t)(rd32(d + lo_at) & 0xFFFF);
-                        uint32_t target = (hi_imm << 16) + (uint32_t)lo_imm;
-                        if (target >= text_lo && target < text_hi && !(target & 3)) {
-                            if (found < max) out[found] = target;
-                            found++;
+            if (rtype == R_MIPS_HI16) {
+                for (uint32_t k = r + 8; k + 8 <= size; k += 8) {
+                    uint32_t lo_info = rd32(d + off + k + 4);
+                    if ((lo_info & 0xFF) == R_MIPS_LO16) {
+                        uint8_t lo_ofs = (uint8_t)((lo_info >> 8) & 0xFF);
+                        size_t lo_base_off = 0;
+                        if (seg_word_offset(e, lo_ofs, load_bias, relocated, img_base, &lo_base_off) == 0) {
+                            uint32_t lo_offset = rd32(d + off + k);
+                            size_t hi_at = ofs_base_off + r_offset;
+                            size_t lo_at = lo_base_off + lo_offset;
+                            if (hi_at + 4 <= word_len && lo_at + 4 <= word_len) {
+                                uint32_t hi_imm = rd32(word_buf + hi_at) & 0xFFFF;
+                                int32_t  lo_imm = (int16_t)(rd32(word_buf + lo_at) & 0xFFFF);
+                                uint32_t target = (hi_imm << 16) + (uint32_t)lo_imm + addr_base_val;
+                                if (target >= text_lo && target < text_hi && !(target & 3)) {
+                                    if (found < max) out[found] = target;
+                                    found++;
+                                }
+                            }
                         }
+                        break;
                     }
                 }
                 continue;
             }
 
-            if ((r_info & 0xFF) != R_MIPS_32) continue;
+            if (rtype != R_MIPS_32) continue;
 
             /* The relocated word holds the address. A PRX links at zero, so
              * the stored value is already the module-relative address and
              * needs no fixing up — only reading. */
-            size_t at = (uint32_t)(r_offset + load_bias);
-            if (at + 4 > len) continue;
+            size_t at = ofs_base_off + r_offset;
+            if (at + 4 > word_len) continue;
 
-            uint32_t target = rd32(d + at);
+            uint32_t target = rd32(word_buf + at) + addr_base_val;
             if (target & 3) continue;            /* not instruction-aligned */
-            if (!looks_like_code(d, len, e, load_bias, target, text_lo, text_hi))
+            if (!looks_like_code(word_buf, word_len, e, load_bias, target, text_lo, text_hi))
                 continue;
 
             if (found < max) out[found] = target;
@@ -589,6 +632,11 @@ int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
         }
     }
     return found;
+}
+
+int psp_collect_pointer_seeds(const uint8_t *d, size_t len, const elf_info *e,
+                              uint32_t load_bias, uint32_t *out, int max) {
+    return psp_collect_pointer_seeds_at(d, len, NULL, 0, 0, e, load_bias, out, max);
 }
 
 int psp_collect_exports(const uint8_t *d, size_t len,
@@ -645,4 +693,123 @@ int psp_collect_exports(const uint8_t *d, size_t len,
         e += stride;
     }
     return found;
+}
+
+
+static void wr32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+int prx_relocate(const uint8_t *in, size_t in_len, const elf_info *e,
+                 uint32_t base, uint8_t **out_buf, size_t *out_size) {
+    if (!in || !e || e->nsegments <= 0 || !out_buf || !out_size) return -1;
+
+    uint32_t image_size = 0;
+    for (int i = 0; i < e->nsegments; i++) {
+        if (e->seg[i].memsz > UINT32_MAX - e->seg[i].addr) return -1;
+        uint32_t end = e->seg[i].addr + e->seg[i].memsz;
+        if (end > image_size) image_size = end;
+    }
+    if (image_size == 0) return -1;
+
+    uint8_t *buf = (uint8_t *)calloc(image_size, 1);
+    if (!buf) return -1;
+
+    for (int i = 0; i < e->nsegments; i++) {
+        if (e->seg[i].filesz > 0) {
+            if (e->seg[i].offset > in_len ||
+                e->seg[i].filesz > in_len - e->seg[i].offset ||
+                e->seg[i].filesz > image_size - e->seg[i].addr) {
+                free(buf);
+                return -1;
+            }
+            memcpy(buf + e->seg[i].addr, in + e->seg[i].offset, e->seg[i].filesz);
+        }
+    }
+
+    for (uint32_t s = 0; s < e->shnum; s++) {
+        size_t sh = (size_t)e->shoff + (size_t)s * e->shentsize;
+        if (sh + 40 > in_len) break;
+
+        uint32_t type = rd32(in + sh + 4);
+        if (type != 0x700000A0u) continue;
+
+        uint32_t off = rd32(in + sh + 16);
+        uint32_t sz = rd32(in + sh + 20);
+        if ((size_t)off > in_len || (size_t)sz > in_len - off || (sz % 8) != 0) continue;
+
+        for (uint32_t r = 0; r + 8 <= sz; r += 8) {
+            uint32_t r_offset = rd32(in + off + r);
+            uint32_t r_info = rd32(in + off + r + 4);
+
+            uint8_t rtype = (uint8_t)(r_info & 0xFF);
+            uint8_t ofsbase = (uint8_t)((r_info >> 8) & 0xFF);
+            uint8_t addrbase = (uint8_t)((r_info >> 16) & 0xFF);
+
+            if (ofsbase >= e->nsegments || addrbase >= e->nsegments) continue;
+            if (e->seg[ofsbase].memsz < 4 || r_offset > e->seg[ofsbase].memsz - 4) continue;
+
+            uint32_t patch_offset = e->seg[ofsbase].addr + r_offset;
+            if (image_size < 4 || patch_offset > image_size - 4) continue;
+
+            uint32_t S = base + e->seg[addrbase].addr;
+
+            switch (rtype) {
+            case R_MIPS_32: {
+                uint32_t w = rd32(buf + patch_offset) + S;
+                wr32(buf + patch_offset, w);
+                break;
+            }
+            case R_MIPS_26: {
+                uint32_t w = rd32(buf + patch_offset);
+                uint32_t target = ((w & 0x03FFFFFF) << 2) + S;
+                w = (w & 0xFC000000) | ((target >> 2) & 0x03FFFFFF);
+                wr32(buf + patch_offset, w);
+                break;
+            }
+            case R_MIPS_HI16: {
+                for (uint32_t k = r + 8; k < sz; k += 8) {
+                    uint32_t next_info = rd32(in + off + k + 4);
+                    if ((next_info & 0xFF) == R_MIPS_LO16) {
+                        uint32_t lo_off = rd32(in + off + k);
+                        uint8_t lo_ofsbase = (uint8_t)((next_info >> 8) & 0xFF);
+                        if (lo_ofsbase < e->nsegments && lo_off + 4 <= e->seg[lo_ofsbase].memsz) {
+                            uint32_t lo_patch = e->seg[lo_ofsbase].addr + lo_off;
+                            if (lo_patch + 4 <= image_size) {
+                                uint32_t hi_w = rd32(buf + patch_offset);
+                                uint32_t lo_w = rd32(buf + lo_patch);
+                                uint32_t hi_imm = hi_w & 0xFFFF;
+                                int32_t lo_imm = (int16_t)(lo_w & 0xFFFF);
+                                int32_t addend = (int32_t)((hi_imm << 16) + lo_imm);
+                                uint32_t val = (uint32_t)addend + S;
+                                uint32_t new_hi = ((val + 0x8000) >> 16) & 0xFFFF;
+                                hi_w = (hi_w & 0xFFFF0000) | new_hi;
+                                wr32(buf + patch_offset, hi_w);
+                            }
+                        }
+                        break;
+                    }
+                }
+                break;
+            }
+            case R_MIPS_LO16: {
+                uint32_t lo_w = rd32(buf + patch_offset);
+                uint32_t lo_imm = lo_w & 0xFFFF;
+                uint32_t new_lo = (lo_imm + S) & 0xFFFF;
+                lo_w = (lo_w & 0xFFFF0000) | new_lo;
+                wr32(buf + patch_offset, lo_w);
+                break;
+            }
+            default:
+                break;
+            }
+        }
+    }
+
+    *out_buf = buf;
+    *out_size = image_size;
+    return 0;
 }

@@ -211,12 +211,136 @@ static void test_sfo(void) {
     }
 }
 
+static uint32_t get32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int has_seed(const uint32_t *seeds, int n, uint32_t val) {
+    for (int i = 0; i < n; i++) {
+        if (seeds[i] == val) return 1;
+    }
+    return 0;
+}
+
+static void test_prx_relocate_and_seeds(void) {
+    /* Synthetic two-segment PRX (e_type 0xFFA0) with SHT_PRXRELOC (0x700000A0)
+     * covering R_MIPS_32, R_MIPS_26, HI16/LO16 with >=0x8000 carry, addrbase=1,
+     * and ofsbase=1 (patching inside segment 1). */
+    uint8_t buf[0x300];
+    memset(buf, 0, sizeof buf);
+    buf[0] = 0x7F; buf[1] = 'E'; buf[2] = 'L'; buf[3] = 'F';
+    buf[4] = 1; buf[5] = 1; buf[6] = 1;
+    put16(buf + 0x10, 0xFFA0);          /* e_type = ET_PSP_PRX */
+    put16(buf + 0x12, 8);               /* e_machine = EM_MIPS */
+    put32(buf + 0x14, 1);               /* e_version */
+    put32(buf + 0x18, 0x00000010);      /* e_entry */
+    put32(buf + 0x1C, 0x34);            /* e_phoff */
+    put32(buf + 0x20, 0x200);           /* e_shoff */
+    put16(buf + 0x28, 0x34);            /* e_ehsize */
+    put16(buf + 0x2A, 0x20);            /* e_phentsize */
+    put16(buf + 0x2C, 2);               /* e_phnum */
+    put16(buf + 0x2E, 0x28);            /* e_shentsize */
+    put16(buf + 0x30, 3);               /* e_shnum */
+
+    /* Segment 0: .text at vaddr 0x00000000, file 0x100..0x140 */
+    uint8_t *ph0 = buf + 0x34;
+    put32(ph0 +  0, 1);                 /* PT_LOAD */
+    put32(ph0 +  4, 0x100);             /* p_offset */
+    put32(ph0 +  8, 0x00000000);        /* p_vaddr */
+    put32(ph0 + 16, 0x40);              /* p_filesz */
+    put32(ph0 + 20, 0x40);              /* p_memsz */
+    put32(ph0 + 24, 0x5);               /* PF_R | PF_X */
+
+    /* Segment 1: .data at vaddr 0x00000080, file 0x140..0x160, memsz 0x30 (0x10 BSS) */
+    uint8_t *ph1 = buf + 0x54;
+    put32(ph1 +  0, 1);                 /* PT_LOAD */
+    put32(ph1 +  4, 0x140);             /* p_offset */
+    put32(ph1 +  8, 0x00000080);        /* p_vaddr */
+    put32(ph1 + 16, 0x20);              /* p_filesz */
+    put32(ph1 + 20, 0x30);              /* p_memsz */
+    put32(ph1 + 24, 0x6);               /* PF_R | PF_W */
+
+    /* Segment 0 words */
+    put32(buf + 0x100, 0x08000004);     /* j 0x00000010 */
+    put32(buf + 0x104, 0x3C040000);     /* lui $a0, 0x0000 */
+    put32(buf + 0x108, 0x24844020);     /* addiu $a0, $a0, 0x4020 -> +0x08804000 = 0x08808020 (lo>=0x8000) */
+    put32(buf + 0x10C, 0x3C050000);     /* lui $a1, 0x0000 */
+    put32(buf + 0x110, 0x24A50014);     /* addiu $a1, $a1, 0x0014 -> code seed in .text */
+    put32(buf + 0x120, 0x00000018);     /* R_MIPS_32 -> 0x08804018 */
+    put32(buf + 0x124, 0x00000004);     /* R_MIPS_32 with addrbase=1 -> 0x08804084 */
+
+    /* Segment 1 words */
+    put32(buf + 0x148, 0x0000001C);     /* R_MIPS_32 with ofsbase=1, addrbase=0 -> 0x0880401C (code seed!) */
+
+    /* SHT_PRXRELOC entries at 0x160 (8 entries = 0x40 bytes) */
+    uint8_t *rel = buf + 0x160;
+    put32(rel +  0, 0x00); put32(rel +  4, (0u << 16) | (0u << 8) | 4u); /* R_MIPS_26 */
+    put32(rel +  8, 0x04); put32(rel + 12, (0u << 16) | (0u << 8) | 5u); /* R_MIPS_HI16 */
+    put32(rel + 16, 0x08); put32(rel + 20, (0u << 16) | (0u << 8) | 6u); /* R_MIPS_LO16 */
+    put32(rel + 24, 0x0C); put32(rel + 28, (0u << 16) | (0u << 8) | 5u); /* R_MIPS_HI16 */
+    put32(rel + 32, 0x10); put32(rel + 36, (0u << 16) | (0u << 8) | 6u); /* R_MIPS_LO16 */
+    put32(rel + 40, 0x20); put32(rel + 44, (0u << 16) | (0u << 8) | 2u); /* R_MIPS_32 */
+    put32(rel + 48, 0x24); put32(rel + 52, (1u << 16) | (0u << 8) | 2u); /* R_MIPS_32 addrbase=1 */
+    put32(rel + 56, 0x08); put32(rel + 60, (0u << 16) | (1u << 8) | 2u); /* R_MIPS_32 ofsbase=1 */
+
+    /* Section headers at 0x200 */
+    uint8_t *sh1 = buf + 0x228;
+    put32(sh1 +  4, 1);                 /* SHT_PROGBITS */
+    put32(sh1 +  8, 6);                 /* SHF_ALLOC | SHF_EXECINSTR */
+    put32(sh1 + 12, 0x00000000);        /* sh_addr */
+    put32(sh1 + 16, 0x100);             /* sh_offset */
+    put32(sh1 + 20, 0x40);              /* sh_size */
+
+    uint8_t *sh2 = buf + 0x250;
+    put32(sh2 +  4, 0x700000A0u);       /* SHT_PRXRELOC */
+    put32(sh2 + 16, 0x160);             /* sh_offset */
+    put32(sh2 + 20, 0x40);              /* sh_size */
+
+    elf_info e;
+    CHECK(elf_parse(buf, sizeof buf, &e) == 0, "parse two-segment synthetic PRX");
+    CHECK(e.nsegments == 2, "two PT_LOAD segments");
+
+    /* Before relocation: psp_collect_pointer_seeds must honour ofsbase=1 (fails on upstream main). */
+    uint32_t raw_seeds[16];
+    int n_raw = psp_collect_pointer_seeds(buf, sizeof buf, &e, e.seg[0].offset - e.seg[0].addr, raw_seeds, 16);
+    CHECK(has_seed(raw_seeds, n_raw, 0x00000014), "unrelocated HI16/LO16 seed collected");
+    CHECK(has_seed(raw_seeds, n_raw, 0x00000018), "unrelocated R_MIPS_32 seed collected");
+    CHECK(has_seed(raw_seeds, n_raw, 0x0000001C), "unrelocated R_MIPS_32 with ofsbase=1 collected");
+
+    /* Relocate at base = 0x08804000 */
+    const uint32_t base = 0x08804000u;
+    uint8_t *reloc = NULL;
+    size_t reloc_sz = 0;
+    CHECK(prx_relocate(buf, sizeof buf, &e, base, &reloc, &reloc_sz) == 0, "prx_relocate succeeds");
+    CHECK(reloc != NULL && reloc_sz == 0xB0, "relocated image covers segment 1 + BSS (0x80 + 0x30)");
+    if (reloc && reloc_sz == 0xB0) {
+        CHECK(get32(reloc + 0x00) == 0x0A201004u, "R_MIPS_26 relocated to j 0x08804010");
+        CHECK(get32(reloc + 0x04) == 0x3C040881u, "R_MIPS_HI16 carries +1 when lo16 >= 0x8000");
+        CHECK(get32(reloc + 0x08) == 0x24848020u, "R_MIPS_LO16 relocated to 0x8020");
+        CHECK(get32(reloc + 0x20) == 0x08804018u, "R_MIPS_32 relocated");
+        CHECK(get32(reloc + 0x24) == 0x08804084u, "R_MIPS_32 with addrbase=1 adds seg[1].addr");
+        CHECK(get32(reloc + 0x88) == 0x0880401Cu, "R_MIPS_32 with ofsbase=1 patches segment 1");
+
+        e.text_addr += base;
+        for (int i = 0; i < e.nsegments; i++) e.seg[i].addr += base;
+        uint32_t rel_seeds[16];
+        int n_rel = psp_collect_pointer_seeds_at(buf, sizeof buf, reloc, reloc_sz, base,
+                                                 &e, (uint32_t)(0 - base), rel_seeds, 16);
+        CHECK(has_seed(rel_seeds, n_rel, 0x08804014u), "relocated HI16/LO16 seed collected");
+        CHECK(has_seed(rel_seeds, n_rel, 0x08804018u), "relocated R_MIPS_32 seed collected");
+        CHECK(has_seed(rel_seeds, n_rel, 0x0880401Cu), "relocated R_MIPS_32 with ofsbase=1 seed collected");
+    }
+    free(reloc);
+}
+
 int main(void) {
     test_sniff();
     test_pbp();
     test_psp_header();
     test_elf();
     test_sfo();
+    test_prx_relocate_and_seeds();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);

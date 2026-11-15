@@ -32,9 +32,10 @@ static int usage(void) {
         "  allegrexrecomp extract <file.iso> <substring> <outdir>\n"
         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
         "  allegrexrecomp cover   <file>\n"
-        "  allegrexrecomp funcs   <file> [--list]\n"
-        "  allegrexrecomp emit    <file> <outdir> [prefix]\n"
+        "  allegrexrecomp funcs   <file> [--list] [--base <addr>]\n"
+        "  allegrexrecomp emit    <file> <outdir> [prefix] [--base <addr>]\n"
         "  allegrexrecomp dump    <file> <addr>\n"
+        "  allegrexrecomp relocate <file> <base> <out>\n"
         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
         "\n"
@@ -458,9 +459,13 @@ static int cmd_cover(const char *path) {
 /* Load a decrypted module and run discovery over it. On success the caller
  * owns both `b` (psp_blob_free) and `an` (a_analysis_free). Shared by `funcs`
  * and `emit`, which differ only in what they do with the result. */
-static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
+static int load_and_discover(const char *path, uint32_t base, uint8_t **out_reloc_buf, size_t *out_reloc_sz,
+                             psp_blob *b, elf_info *e,
                              a_analysis *an, int *out_nseeds, int *out_nexports,
                              int *out_nptr, int *out_scanned) {
+    if (out_reloc_buf) *out_reloc_buf = NULL;
+    if (out_reloc_sz)  *out_reloc_sz = 0;
+
     if (psp_blob_read(path, b) != 0) { fprintf(stderr, "cannot read %s\n", path); return -1; }
 
     if (psp_sniff(b->data, b->size < 16 ? b->size : 16) != FMT_ELF ||
@@ -471,12 +476,34 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
         return -1;
     }
 
+    uint8_t *reloc_buf = NULL;
+    size_t reloc_sz = 0;
+    if (base != 0 && e->nsegments) {
+        if (prx_relocate(b->data, b->size, e, base, &reloc_buf, &reloc_sz) != 0) {
+            fprintf(stderr, "failed to relocate PRX %s at 0x%08X\n", path, base);
+            psp_blob_free(b);
+            return -1;
+        }
+        e->entry += base;
+        e->text_addr += base;
+        e->stub_addr += base;
+        if (e->modinfo_size) e->modinfo_addr += base;
+        for (int i = 0; i < e->nsegments; i++) e->seg[i].addr += base;
+
+        if (out_reloc_buf) *out_reloc_buf = reloc_buf;
+        if (out_reloc_sz)  *out_reloc_sz = reloc_sz;
+    }
+
     memset(an, 0, sizeof *an);
     /* Walk the whole loaded image, not just .text: a module can place
      * executable code outside it (C++ static initialisers, notably), and
      * restricting the extent to .text makes that code invisible. The linear
      * jal harvest stays confined to .text via scan_base/scan_size. */
-    if (e->nsegments) {
+    if (reloc_buf) {
+        an->code = reloc_buf + (e->seg[0].addr - base);
+        an->base = e->seg[0].addr;
+        an->size = e->seg[0].filesz;
+    } else if (e->nsegments) {
         an->code = b->data + e->seg[0].offset;
         an->base = e->seg[0].addr;
         an->size = e->seg[0].filesz;
@@ -491,7 +518,11 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
     an->stub_size = e->stub_size;
     an->scan_calls = 1;
     /* The whole loaded segment, so jump tables in .rodata/.data can be read. */
-    if (e->nsegments) {
+    if (reloc_buf) {
+        an->image      = reloc_buf;
+        an->image_base = base;
+        an->image_size = (uint32_t)reloc_sz;
+    } else if (e->nsegments) {
         an->image      = b->data + e->seg[0].offset;
         an->image_base = e->seg[0].addr;
         an->image_size = e->seg[0].filesz;
@@ -507,27 +538,35 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
      *      control-flow scan can see
      *
      * (`jal` targets are harvested separately, inside discovery itself.) */
-    const uint32_t bias = e->nsegments ? e->seg[0].offset - e->seg[0].addr : 0;
+    const uint8_t *img = reloc_buf ? reloc_buf : b->data;
+    const size_t img_len = reloc_buf ? reloc_sz : b->size;
+    const uint32_t bias = reloc_buf
+        ? (uint32_t)(0 - base)
+        : (e->nsegments ? e->seg[0].offset - e->seg[0].addr : 0);
 
     /* Size the buffer from an actual count rather than a guessed maximum. */
-    int nptr_avail = psp_collect_pointer_seeds(b->data, b->size, e, bias, NULL, 0);
+    int nptr_avail = psp_collect_pointer_seeds_at(b->data, b->size,
+                                                  reloc_buf, reloc_sz, base,
+                                                  e, bias, NULL, 0);
     int cap = 1 + 512 + nptr_avail;
     uint32_t *seeds = (uint32_t *)malloc((size_t)cap * sizeof *seeds);
-    if (!seeds) { psp_blob_free(b); return -1; }
+    if (!seeds) { free(reloc_buf); psp_blob_free(b); return -1; }
 
     int nseeds = 0;
     seeds[nseeds++] = e->entry;
 
     psp_module_info mi;
     int nexports = 0;
-    if (e->modinfo_size && psp_modinfo_parse(b->data, b->size, e->modinfo_offset, &mi) == 0) {
-        nexports = psp_collect_exports(b->data, b->size, &mi, bias, seeds + nseeds, 512);
+    uint32_t mi_off = reloc_buf ? (e->modinfo_addr - base) : e->modinfo_offset;
+    if (e->modinfo_size && psp_modinfo_parse(img, img_len, mi_off, &mi) == 0) {
+        nexports = psp_collect_exports(img, img_len, &mi, bias, seeds + nseeds, 512);
         if (nexports > 512) nexports = 512;
         nseeds += nexports;
     }
 
-    int nptr = psp_collect_pointer_seeds(b->data, b->size, e, bias,
-                                         seeds + nseeds, cap - nseeds);
+    int nptr = psp_collect_pointer_seeds_at(b->data, b->size,
+                                            reloc_buf, reloc_sz, base,
+                                            e, bias, seeds + nseeds, cap - nseeds);
     if (nptr > cap - nseeds) nptr = cap - nseeds;
     nseeds += nptr;
 
@@ -536,7 +575,7 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
      * nothing to enumerate. Fall back to recognising pointers by shape, which
      * is a heuristic rather than a fact and is only used when enumeration
      * genuinely had nothing to offer. */
-    if (nptr == 0 && e->nsegments) {
+    if (!reloc_buf && nptr == 0 && e->nsegments) {
         const elf_segment *s = &e->seg[0];
         uint32_t data_off = e->text_offset + e->text_size;
         uint32_t seg_end  = s->offset + s->filesz;
@@ -561,6 +600,7 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
     free(seeds);
     if (rc != 0) {
         fprintf(stderr, "discovery failed (out of memory)\n");
+        free(reloc_buf);
         psp_blob_free(b);
         return -1;
     }
@@ -572,13 +612,15 @@ static int load_and_discover(const char *path, psp_blob *b, elf_info *e,
     return 0;
 }
 
-static int cmd_funcs(const char *path, int list) {
+static int cmd_funcs(const char *path, int list, uint32_t base) {
     psp_blob b;
     elf_info e;
     a_analysis an;
     int nseeds = 0, nexports = 0, nptr = 0, scanned = 0;
+    uint8_t *reloc_buf = NULL;
+    size_t reloc_sz = 0;
 
-    if (load_and_discover(path, &b, &e, &an, &nseeds, &nexports, &nptr, &scanned) != 0) return 1;
+    if (load_and_discover(path, base, &reloc_buf, &reloc_sz, &b, &e, &an, &nseeds, &nexports, &nptr, &scanned) != 0) return 1;
 
     printf("module:     %s\n", path);
     printf("code:       0x%08X + %u bytes  (%u instructions)\n",
@@ -608,12 +650,15 @@ static int cmd_funcs(const char *path, int list) {
      * nothing outside it does. */
     if (e.modinfo_size) {
         psp_module_info mi2;
-        if (psp_modinfo_parse(b.data, b.size, e.modinfo_offset, &mi2) == 0) {
-            uint32_t bias = e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0;
-            int nimp = psp_collect_imports(b.data, b.size, &mi2, bias, NULL, 0);
+        const uint8_t *src_data = reloc_buf ? reloc_buf : b.data;
+        size_t src_size = reloc_buf ? reloc_sz : b.size;
+        uint32_t mi_off = reloc_buf ? (e.modinfo_addr - base) : e.modinfo_offset;
+        if (psp_modinfo_parse(src_data, src_size, mi_off, &mi2) == 0) {
+            uint32_t bias = reloc_buf ? (uint32_t)(0 - base) : (e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0);
+            int nimp = psp_collect_imports(src_data, src_size, &mi2, bias, NULL, 0);
             psp_import_entry *imp = (psp_import_entry *)malloc((size_t)(nimp ? nimp : 1) * sizeof *imp);
             if (imp) {
-                nimp = psp_collect_imports(b.data, b.size, &mi2, bias, imp, nimp);
+                nimp = psp_collect_imports(src_data, src_size, &mi2, bias, imp, nimp);
 
                 /* Count functions per library, preserving first-seen order. */
                 char libs[64][32];
@@ -696,6 +741,7 @@ static int cmd_funcs(const char *path, int list) {
         }
     }
 
+    if (reloc_buf) free(reloc_buf);
     a_analysis_free(&an);
     psp_blob_free(&b);
     return 0;
@@ -703,29 +749,33 @@ static int cmd_funcs(const char *path, int list) {
 
 /* ---- the emitter --------------------------------------------------------- */
 
-static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
+static int cmd_emit(const char *path, const char *outdir, const char *prefix, uint32_t base) {
     psp_blob b;
     elf_info e;
     a_analysis an;
+    uint8_t *reloc_buf = NULL;
+    size_t reloc_sz = 0;
 
-    if (load_and_discover(path, &b, &e, &an, NULL, NULL, NULL, NULL) != 0) return 1;
+    if (load_and_discover(path, base, &reloc_buf, &reloc_sz, &b, &e, &an, NULL, NULL, NULL, NULL) != 0) return 1;
 
     psp_module_info mi;
     const char *module = "(unknown)";
-    if (e.modinfo_size && psp_modinfo_parse(b.data, b.size, e.modinfo_offset, &mi) == 0)
+    const uint8_t *src_data = reloc_buf ? reloc_buf : b.data;
+    size_t src_size = reloc_buf ? reloc_sz : b.size;
+    uint32_t mi_off = reloc_buf ? (e.modinfo_addr - base) : e.modinfo_offset;
+    if (e.modinfo_size && psp_modinfo_parse(src_data, src_size, mi_off, &mi) == 0)
         module = mi.name;
-
 
     /* The import table lets each generated thunk dispatch to the HLE layer by
      * NID instead of merely trapping. */
     psp_import_entry *imp = NULL;
     int nimp = 0;
     if (e.modinfo_size) {
-        uint32_t bias = e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0;
-        nimp = psp_collect_imports(b.data, b.size, &mi, bias, NULL, 0);
+        uint32_t bias = reloc_buf ? (uint32_t)(0 - base) : (e.nsegments ? e.seg[0].offset - e.seg[0].addr : 0);
+        nimp = psp_collect_imports(src_data, src_size, &mi, bias, NULL, 0);
         if (nimp > 0) {
             imp = (psp_import_entry *)malloc((size_t)nimp * sizeof *imp);
-            if (imp) nimp = psp_collect_imports(b.data, b.size, &mi, bias, imp, nimp);
+            if (imp) nimp = psp_collect_imports(src_data, src_size, &mi, bias, imp, nimp);
             else nimp = 0;
         }
     }
@@ -754,6 +804,7 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
     }
 
     free(imp);
+    if (reloc_buf) free(reloc_buf);
     a_analysis_free(&an);
     psp_blob_free(&b);
     return rc == 0 ? 0 : 1;
@@ -770,7 +821,7 @@ static int cmd_dump(const char *path, const char *addrs) {
     uint32_t addr = (uint32_t)strtoul(addrs, NULL, 0);
     int rc;
 
-    if (load_and_discover(path, &b, &e, &an, NULL, NULL, NULL, NULL) != 0) return 1;
+    if (load_and_discover(path, 0, NULL, NULL, &b, &e, &an, NULL, NULL, NULL, NULL) != 0) return 1;
 
     rc = a_emit_one(&an, addr, stdout);
     if (rc != 0)
@@ -780,6 +831,48 @@ static int cmd_dump(const char *path, const char *addrs) {
     a_analysis_free(&an);
     psp_blob_free(&b);
     return rc == 0 ? 0 : 1;
+}
+
+static int cmd_relocate(const char *path, uint32_t base, const char *out_path) {
+    psp_blob b;
+    if (psp_blob_read(path, &b) != 0) { fprintf(stderr, "cannot read %s\n", path); return 1; }
+
+    if (psp_sniff(b.data, b.size < 16 ? b.size : 16) != FMT_ELF) {
+        fprintf(stderr, "%s is not an ELF/PRX file\n", path);
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    elf_info e;
+    if (elf_parse(b.data, b.size, &e) != 0) {
+        fprintf(stderr, "cannot parse ELF in %s\n", path);
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    uint8_t *reloc_buf = NULL;
+    size_t reloc_sz = 0;
+    if (prx_relocate(b.data, b.size, &e, base, &reloc_buf, &reloc_sz) != 0) {
+        fprintf(stderr, "failed to relocate PRX %s at 0x%08X\n", path, base);
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    FILE *f = fopen(out_path, "wb");
+    if (!f) {
+        fprintf(stderr, "cannot write %s\n", out_path);
+        free(reloc_buf);
+        psp_blob_free(&b);
+        return 1;
+    }
+
+    fwrite(reloc_buf, 1, reloc_sz, f);
+    fclose(f);
+    printf("relocated %s to 0x%08X (%zu bytes written to %s)\n", path, base, reloc_sz, out_path);
+
+    free(reloc_buf);
+    psp_blob_free(&b);
+    return 0;
 }
 
 /* ---- decryption ---------------------------------------------------------- */
@@ -992,14 +1085,37 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "info"))    return cmd_info(argv[2]);
     if (!strcmp(cmd, "ls"))      return cmd_ls(argv[2]);
     if (!strcmp(cmd, "cover"))   return cmd_cover(argv[2]);
-    if (!strcmp(cmd, "funcs"))   return cmd_funcs(argv[2], argc > 3 && !strcmp(argv[3], "--list"));
+    if (!strcmp(cmd, "funcs")) {
+        int list = 0;
+        uint32_t base = 0;
+        for (int i = 3; i < argc; i++) {
+            if (!strcmp(argv[i], "--list")) list = 1;
+            else if (!strcmp(argv[i], "--base") && i + 1 < argc) base = (uint32_t)strtoul(argv[++i], NULL, 0);
+        }
+        return cmd_funcs(argv[2], list, base);
+    }
     if (!strcmp(cmd, "emit")) {
         if (argc < 4) return usage();
-        return cmd_emit(argv[2], argv[3], argc > 4 ? argv[4] : NULL);
+        const char *outdir = argv[3];
+        const char *prefix = NULL;
+        uint32_t base = 0;
+        for (int i = 4; i < argc; i++) {
+            if (!strcmp(argv[i], "--base") && i + 1 < argc) {
+                base = (uint32_t)strtoul(argv[++i], NULL, 0);
+            } else if (!prefix && argv[i][0] != '-') {
+                prefix = argv[i];
+            }
+        }
+        return cmd_emit(argv[2], outdir, prefix, base);
     }
     if (!strcmp(cmd, "dump")) {
         if (argc < 4) return usage();
         return cmd_dump(argv[2], argv[3]);
+    }
+    if (!strcmp(cmd, "relocate")) {
+        if (argc < 5) return usage();
+        uint32_t base = (uint32_t)strtoul(argv[3], NULL, 0);
+        return cmd_relocate(argv[2], base, argv[4]);
     }
     if (!strcmp(cmd, "extract")) {
         if (argc < 5) return usage();
