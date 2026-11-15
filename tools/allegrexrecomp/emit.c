@@ -644,7 +644,7 @@ static void mark_labels(ectx *c, const a_func *fn) {
         if (in.has_target && in.is_branch && owned_by(an, in.target, owner))
             c->is_label[widx(an, in.target)] = 1;
         if (in.is_jump && !in.is_indirect && in.has_target &&
-            owned_by(an, in.target, owner) && !is_function(an, in.target))
+            owned_by(an, in.target, owner))
             c->is_label[widx(an, in.target)] = 1;
         if (in.has_delay_slot && owned_by(an, a + 4, owner))
             c->is_slot[widx(an, a + 4)] = 1;
@@ -1045,7 +1045,8 @@ static void emit_function(ectx *c, const a_func *fn) {
 
         if (in.is_jump) {                        /* j */
             if (have_slot || taken_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            if (owned_by(an, in.target, owner) && !is_function(an, in.target)) {
+            if (owned_by(an, in.target, owner)) {
+                if (in.target <= a) fprintf(f, "    PSP_LOOP(0x%08Xu);\n", in.target);
                 fprintf(f, "    goto L_%08X;\n", in.target);
             } else {
                 emit_static_call_tail(c, in.target);  /* tail call, and it must stay one */
