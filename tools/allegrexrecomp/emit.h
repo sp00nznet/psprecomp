@@ -40,6 +40,10 @@ typedef struct {
      * routine's computed targets become reachable without the analysis having
      * to guess them (hints.h). */
     const a_hints *hints;
+
+    /* Emit body-ending transfers as PSP_TAIL(...) and calls through psp_run(...)
+     * so cross-function tail-call chains stay flat on the host stack. */
+    int                     trampoline;
 } emit_opts;
 
 /* Emit the whole module: <prefix>_funcs.h, <prefix>_imports.c,

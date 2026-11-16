@@ -27,6 +27,57 @@ static int failures;
     CHECK((got) == (want), "%s: got 0x%08X, want 0x%08X",       \
           (label), (unsigned)(got), (unsigned)(want))
 
+/* ---- the trampoline ------------------------------------------------------
+ *
+ * Three functions that hand over to each other in a cycle, as code emitted
+ * with --trampoline does. psp_run must run the whole chain one frame deep. */
+enum { TR_ROUNDS = 100000, TR_ADDR = 0x08900000u };
+static int tr_depth, tr_max_depth;
+static long tr_steps;
+static void tr_c(void);
+static void tr_enter(void) { if (++tr_depth > tr_max_depth) tr_max_depth = tr_depth; tr_steps++; }
+static void tr_a(void) { tr_enter(); psp_next = tr_steps < 3L * TR_ROUNDS ? tr_c : NULL; tr_depth--; }
+static void tr_b(void) { tr_enter(); psp_next = tr_a; tr_depth--; }
+static void tr_c(void) { tr_enter(); psp_dispatch_tail(TR_ADDR); tr_depth--; }   /* indirect */
+
+static void tr_unwinds(void) { psp_next = tr_a; psp_cpu.unwind = 0x08800000u; }
+static void tr_stale(void) { tr_steps = -1000; }
+
+static void test_trampoline(void) {
+    psp_register(TR_ADDR, tr_b);
+
+    tr_depth = tr_max_depth = 0;
+    tr_steps = 0;
+    psp_run(tr_a);
+    CHECK(tr_steps == 3L * TR_ROUNDS + 1, "the chain runs to its end: %ld steps", tr_steps);
+    CHECK(tr_max_depth == 1, "the chain stays one call deep: %d", tr_max_depth);
+    CHECK(psp_next == NULL, "psp_next is empty after the chain");
+
+    tr_steps = 0;
+    psp_run(tr_unwinds);
+    CHECK(tr_steps == 0, "an unwind ends the chain before its next step");
+    CHECK(psp_next == NULL, "an unwind leaves psp_next empty");
+    psp_cpu.unwind = 0;
+
+    /* A stopped run can leave psp_next set; the next entry from the host must
+     * not run it. */
+    psp_next = tr_stale;
+    tr_steps = 0;
+    psp_register(TR_ADDR + 4, tr_b);
+    psp_call_from_host(TR_ADDR + 4);
+    CHECK(tr_steps == 3L * TR_ROUNDS + 2, "an entry from the host runs only its own chain: %ld",
+          tr_steps);
+
+    /* A guest call runs the callee's chain before it returns to the caller. */
+    tr_depth = tr_max_depth = 0;
+    tr_steps = 0;
+    psp_call_guest_fn(tr_a, 0x08800010u);
+    CHECK(tr_steps == 3L * TR_ROUNDS + 1, "a guest call runs the callee's whole chain: %ld",
+          tr_steps);
+    CHECK(tr_max_depth == 1, "the callee's chain stays one call deep: %d", tr_max_depth);
+    CHECK(psp_next == NULL, "psp_next is empty after the guest call");
+}
+
 static void test_zero_register(void) {
     /* $zero is hardwired. A recompiled store to it must be a no-op, not a
      * write — otherwise one bad decode corrupts every later read of $zero. */
@@ -294,6 +345,7 @@ int main(void) {
     test_sp_histogram();
     test_sp_call_histogram();
     test_stack_handover();
+    test_trampoline();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
