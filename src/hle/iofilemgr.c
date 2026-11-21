@@ -89,8 +89,23 @@ static void map_path(const char *guest, char *out, size_t cap) {
 
 static void hle_Open(void) {
     char guest[512], host[1024];
-    psp_str(psp_arg(0), guest, sizeof guest);
+    uint32_t name = psp_arg(0);
+    if (!name) {
+        if (getenv("PSPRECOMP_TRACE_IO"))
+            fprintf(stderr, "io: open (null): invalid argument\n");
+        psp_ret(0x80010016u);  /* EINVAL; address zero may still be mapped */
+        return;
+    }
+    psp_str(name, guest, sizeof guest);
     uint32_t flags = psp_arg(1);
+    /* An empty filename maps to root/disc/. POSIX fopen may open that directory
+     * successfully, handing the guest a file descriptor that cannot read data. */
+    if (!guest[0]) {
+        if (getenv("PSPRECOMP_TRACE_IO"))
+            fprintf(stderr, "io: open (empty): not found\n");
+        psp_ret(0x80010002u);  /* ENOENT */
+        return;
+    }
     map_path(guest, host, sizeof host);
 
     const char *mode = "rb";
