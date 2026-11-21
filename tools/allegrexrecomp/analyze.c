@@ -533,7 +533,12 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
      * data table. Any lui whose paired addiu/ori yields an address that is
      * in range and decodes as valid code is promoted to an entry, same
      * over-split-is-safe reasoning as everywhere else in this file. */
-    if (an->scan_calls) {
+    /* When an->image is present, pointer seeds are already harvested from
+     * relocation tables (or ET_EXEC data scan). Scanning .text for lui+addiu
+     * pairs on an unrelocated PRX (whose lui immediates are 0) produces false
+     * entries at 0x0000xxxx, while on a relocated PRX R_MIPS_HI16/LO16
+     * relocations already enumerate every split-pair code reference. */
+    if (an->scan_calls && !an->image) {
         uint32_t sbase = an->scan_size ? an->scan_base : an->base;
         uint32_t ssize = an->scan_size ? an->scan_size : an->size;
         for (uint32_t off = 0; off + 4 <= ssize; off += 4) {

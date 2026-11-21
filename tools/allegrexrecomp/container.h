@@ -176,7 +176,22 @@ typedef struct {
 int psp_collect_pointer_seeds(const uint8_t *data, size_t len, const elf_info *e,
                               uint32_t load_bias, uint32_t *out, int max);
 
+/* Same as psp_collect_pointer_seeds, but reads patched words from a relocated
+ * image `img` (mapped at `img_base`) while still reading relocation tables
+ * from `elf`. When `img` is NULL, behaves identically to psp_collect_pointer_seeds. */
+int psp_collect_pointer_seeds_at(const uint8_t *elf, size_t elf_len,
+                                 const uint8_t *img, size_t img_len,
+                                 uint32_t img_base, const elf_info *e,
+                                 uint32_t load_bias, uint32_t *out, int max);
+
 int elf_parse(const uint8_t *data, size_t len, elf_info *out);
+
+/* Relocate a PRX (ELF32, e_type 0xFFA0) to a caller-specified base address.
+ * Allocates and returns a newly allocated buffer covering the full memory footprint
+ * of all PT_LOAD segments (with BSS zeroed and SHT_PRXRELOC applied).
+ * Caller must free() *out_buf. */
+int prx_relocate(const uint8_t *in, size_t in_len, const elf_info *e,
+                 uint32_t base, uint8_t **out_buf, size_t *out_size);
 
 /* ---- PSP module info ------------------------------------------------------
  * The PRX descriptor: where the export and import tables live, and the $gp
