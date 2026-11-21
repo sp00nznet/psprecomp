@@ -27,6 +27,7 @@ typedef struct {
     uint8_t *is_slot;      /* per word: consumed as a delay slot */
     uint32_t *entries;     /* interior labels that got a dispatch thunk */
     int nentries, centries;
+    int trampoline;
 } ectx;
 
 static void entry_push(ectx *c, uint32_t a) {
@@ -144,9 +145,11 @@ static void emit_static_call_tail(ectx *c, uint32_t target) {
     if (is_import(c->an, target)) {
         fprintf(c->out, "    psp_import_%08X();\n", target);
     } else if (is_function(c->an, target)) {
-        fprintf(c->out, "    psp_func_%08X();\n", target);
+        if (c->trampoline) fprintf(c->out, "    PSP_TAIL(psp_func_%08X);\n", target);
+        else               fprintf(c->out, "    psp_func_%08X();\n", target);
     } else {
-        fprintf(c->out, "    psp_dispatch(0x%08Xu);  /* not discovered */\n", target);
+        if (c->trampoline) fprintf(c->out, "    psp_dispatch_tail(0x%08Xu);  /* not discovered */\n", target);
+        else               fprintf(c->out, "    psp_dispatch(0x%08Xu);  /* not discovered */\n", target);
     }
 }
 
@@ -883,7 +886,8 @@ static void emit_function(ectx *c, const a_func *fn) {
                 if (owned_by(an, a + 8, owner) && c->is_label[widx(an, a + 8)])
                     fprintf(f, "        goto L_%08X;\n", a + 8);
                 else
-                    fprintf(f, "        psp_dispatch(0x%08Xu); return;\n", a + 8);
+                    fprintf(f, c->trampoline ? "        psp_dispatch_tail(0x%08Xu); return;\n"
+                                             : "        psp_dispatch(0x%08Xu); return;\n", a + 8);
             }
             fprintf(f, "      } }\n");
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
@@ -939,16 +943,30 @@ static void emit_function(ectx *c, const a_func *fn) {
                     comment(c, &slot);
                     emit_simple(c, &slot, "        ");
                     fprintf(f, "        ");
-                    if (is_import(an, in.target))        fprintf(f, "psp_import_%08X();", in.target);
-                    else if (is_function(an, in.target)) fprintf(f, "psp_func_%08X();", in.target);
-                    else                                 fprintf(f, "psp_dispatch(0x%08Xu);", in.target);
-                    fprintf(f, "\n        return; } }\n");
+                    if (c->trampoline) {
+                        if (is_import(an, in.target))        fprintf(f, "psp_import_%08X(); return;", in.target);
+                        else if (is_function(an, in.target)) fprintf(f, "PSP_TAIL(psp_func_%08X);", in.target);
+                        else                                 fprintf(f, "psp_dispatch_tail(0x%08Xu); return;", in.target);
+                    } else {
+                        if (is_import(an, in.target))        fprintf(f, "psp_import_%08X();", in.target);
+                        else if (is_function(an, in.target)) fprintf(f, "psp_func_%08X();", in.target);
+                        else                                 fprintf(f, "psp_dispatch(0x%08Xu);", in.target);
+                        fprintf(f, "\n        return;");
+                    }
+                    fprintf(f, " } }\n");
                 } else {
                     fprintf(f, "      if (_c) { ");
-                    if (is_import(an, in.target))        fprintf(f, "psp_import_%08X();", in.target);
-                    else if (is_function(an, in.target)) fprintf(f, "psp_func_%08X();", in.target);
-                    else                                 fprintf(f, "psp_dispatch(0x%08Xu);", in.target);
-                    fprintf(f, " return; } }\n");
+                    if (c->trampoline) {
+                        if (is_import(an, in.target))        fprintf(f, "psp_import_%08X(); return;", in.target);
+                        else if (is_function(an, in.target)) fprintf(f, "PSP_TAIL(psp_func_%08X);", in.target);
+                        else                                 fprintf(f, "psp_dispatch_tail(0x%08Xu); return;", in.target);
+                    } else {
+                        if (is_import(an, in.target))        fprintf(f, "psp_import_%08X();", in.target);
+                        else if (is_function(an, in.target)) fprintf(f, "psp_func_%08X();", in.target);
+                        else                                 fprintf(f, "psp_dispatch(0x%08Xu);", in.target);
+                        fprintf(f, " return;");
+                    }
+                    fprintf(f, " } }\n");
                 }
             }
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
@@ -1037,7 +1055,8 @@ static void emit_function(ectx *c, const a_func *fn) {
              * jr reads $ra before its delay slot, as for jr $rN below. */
             fprintf(f, "    { uint32_t _t = r_ra;\n");
             if (have_slot || taken_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            fprintf(f, "    if (psp_ra_is_jump(_t)) { psp_dispatch(_t); return; } }\n");
+            fprintf(f, "    if (psp_ra_is_jump(_t)) { %s(_t); return; } }\n",
+                    c->trampoline ? "psp_dispatch_tail" : "psp_dispatch");
             /* Only a genuine `jr $ra` is expected to leave $sp as it found it.
              * Tail jumps and cross-function transfers are emitted as `return`
              * too, but their epilogue runs in the target, so $sp is correctly
@@ -1054,7 +1073,8 @@ static void emit_function(ectx *c, const a_func *fn) {
             /* The target is read before the delay slot, as for jalr above. */
             fprintf(f, "    { uint32_t _t = %s;\n", RN[in.rs]);
             if (have_slot || taken_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            fprintf(f, "    psp_dispatch(_t);\n    return; }\n");
+            fprintf(f, "    %s(_t);\n    return; }\n",
+                    c->trampoline ? "psp_dispatch_tail" : "psp_dispatch");
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
             continue;
@@ -1067,7 +1087,8 @@ static void emit_function(ectx *c, const a_func *fn) {
                 fprintf(f, "    goto L_%08X;\n", in.target);
             } else {
                 emit_static_call_tail(c, in.target);  /* tail call, and it must stay one */
-                fprintf(f, "    return;\n");
+                if (!c->trampoline || !is_function(an, in.target))
+                    fprintf(f, "    return;\n");
             }
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
@@ -1109,12 +1130,14 @@ static void emit_function(ectx *c, const a_func *fn) {
         uint32_t next = fn->end;
         if (is_function(an, next)) {
             fprintf(f, "    /* falls through into the next function */\n");
-            fprintf(f, "    psp_func_%08X();\n", next);
+            fprintf(f, c->trampoline ? "    PSP_TAIL(psp_func_%08X);\n"
+                                     : "    psp_func_%08X();\n", next);
         } else if (next < an->base + an->size &&
                    an->owner[widx(an, next)] != A_NO_OWNER &&
                    !c->is_slot[widx(an, next)] && c->is_label[widx(an, next)]) {
             fprintf(f, "    /* falls through into 0x%08X, a label of another body */\n", next);
-            fprintf(f, "    psp_at_%08X();\n", next);
+            fprintf(f, c->trampoline ? "    PSP_TAIL(psp_at_%08X);\n"
+                                     : "    psp_at_%08X();\n", next);
         }
         /* The remaining case -- an address no body holds, usually a `.word`
          * tail -- keeps the silent return for now. Dispatching there instead
@@ -1169,7 +1192,28 @@ static void emit_header(FILE *f, const ectx *c, const emit_opts *o) {
         " * unwind aimed further out; the helper consumes its own return site. */\n"
         "#define PSP_CALL_BEGIN(r) {\n"
         "#define PSP_CALL_END(r) if (psp_cpu.unwind) return; }\n"
-        "\n"
+        "\n",
+        o->module ? o->module : "(unknown)", an->nfuncs, an->nimports);
+    if (c->trampoline) {
+        fprintf(f,
+            "#ifndef PSP_THREAD_LOCAL\n"
+            "#  if defined(__cplusplus)\n"
+            "#    define PSP_THREAD_LOCAL thread_local\n"
+            "#  elif defined(_MSC_VER)\n"
+            "#    define PSP_THREAD_LOCAL __declspec(thread)\n"
+            "#  elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L\n"
+            "#    define PSP_THREAD_LOCAL _Thread_local\n"
+            "#  else\n"
+            "#    define PSP_THREAD_LOCAL __thread\n"
+            "#  endif\n"
+            "#endif\n"
+            "extern PSP_THREAD_LOCAL psp_fn_t psp_next;\n"
+            "void psp_run(psp_fn_t fn);\n"
+            "void psp_dispatch_tail(uint32_t addr);\n"
+            "#define PSP_TAIL(fn) { psp_next = (fn); return; }\n"
+            "\n");
+    }
+    fprintf(f,
         "/* Build with -DPSPRECOMP_TRACE to record every function entry. Costs\n"
         " * one store per call when on, and nothing at all when off. A dispatch\n"
         " * miss then reports how the code arrived, not just where it went. */\n"
@@ -1204,8 +1248,7 @@ static void emit_header(FILE *f, const ectx *c, const emit_opts *o) {
         "#  endif\n"
         "#endif\n"
         "\n"
-        "/* Register aliases, so the generated code reads like the assembly. */\n",
-        o->module ? o->module : "(unknown)", an->nfuncs, an->nimports);
+        "/* Register aliases, so the generated code reads like the assembly. */\n");
 
     for (int i = 0; i < 32; i++)
         fprintf(f, "#define %-7s psp_cpu.r[%d]\n", RN[i], i);
@@ -1418,6 +1461,7 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
     c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
     c.entries = NULL;
     c.nentries = c.centries = 0;
+    c.trampoline = o->trampoline;
     if (!c.is_label || !c.is_slot) goto fail;
 
 /* Commit the current output file, counting it, and bail out on an I/O error. */
@@ -1531,6 +1575,7 @@ int a_emit_one(const a_analysis *an, uint32_t addr, FILE *out) {
     uint32_t want = addr & ~3u;
     ectx c;
     int i;
+    memset(&c, 0, sizeof c);
 
     /* An address that turns up in a trace is usually somewhere *inside* a
      * function rather than at its entry -- a clobbered register, a frame that

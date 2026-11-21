@@ -34,7 +34,7 @@ static int usage(void) {
         "  allegrexrecomp dis     <file> [start-addr] [count]\n"
         "  allegrexrecomp cover   <file>\n"
         "  allegrexrecomp funcs   <file> [--list] [--base <addr>]\n"
-        "  allegrexrecomp emit    <file> <outdir> [prefix] [--base <addr>] [--hints <path>]\n"
+        "  allegrexrecomp emit    <file> <outdir> [prefix] [--base <addr>] [--hints <path>] [--trampoline]\n"
         "  allegrexrecomp dump    <file> <addr>\n"
         "  allegrexrecomp relocate <file> <base> <out>\n"
         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
@@ -755,7 +755,7 @@ static int cmd_funcs(const char *path, int list, uint32_t base) {
 /* ---- the emitter --------------------------------------------------------- */
 
 static int cmd_emit(const char *path, const char *outdir, const char *prefix, uint32_t base,
-                    const char *hintspath) {
+                    const char *hintspath, int trampoline) {
     psp_blob b;
     elf_info e;
     a_analysis an;
@@ -807,6 +807,7 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix, ui
     o.imports = imp;
     o.nimports = nimp;
     o.hints = hintspath ? &hints : NULL;
+    o.trampoline = trampoline;
 
     printf("module:     %s\n", module);
     printf("functions:  %d\n", an.nfuncs);
@@ -1120,18 +1121,21 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(cmd, "emit")) {
         if (argc < 4) return usage();
-        /* [prefix] [--base <addr>] [--hints <path>], in any order: the prefix
-         * stays optional so every existing command line keeps working. */
+        /* [prefix] [--base <addr>] [--hints <path>] [--trampoline], in any
+         * order: the prefix stays optional so every existing command line
+         * keeps working. */
         const char *prefix = NULL;
         const char *hintspath = NULL;
         uint32_t base = 0;
+        int trampoline = 0;
         for (int i = 4; i < argc; i++) {
             if (!strcmp(argv[i], "--hints") && i + 1 < argc) { hintspath = argv[++i]; continue; }
+            if (!strcmp(argv[i], "--trampoline")) { trampoline = 1; continue; }
             if (!strcmp(argv[i], "--base") && i + 1 < argc) { base = (uint32_t)strtoul(argv[++i], NULL, 0); continue; }
             if (!prefix && argv[i][0] != '-') { prefix = argv[i]; continue; }
             return usage();
         }
-        return cmd_emit(argv[2], argv[3], prefix, base, hintspath);
+        return cmd_emit(argv[2], argv[3], prefix, base, hintspath, trampoline);
     }
     if (!strcmp(cmd, "dump")) {
         if (argc < 4) return usage();

@@ -211,9 +211,24 @@ void psp_dispatch_set_budget(uint64_t calls, void (*on_exceeded)(void)) {
 
 uint64_t psp_dispatch_calls(void) { return g_calls; }
 
+PSP_THREAD_LOCAL psp_fn_t psp_next;
+
+void psp_run(psp_fn_t fn) {
+    while (fn) {
+        fn();
+        if (psp_cpu.unwind) {         /* returning past this call: end the chain */
+            psp_next = NULL;
+            return;
+        }
+        fn = psp_next;
+        psp_next = NULL;
+    }
+}
+
 void psp_call_from_host(uint32_t addr) {
     psp_frame f = { 0, psp_cpu.frame };
     psp_cpu.frame = &f;
+    psp_next = NULL;                 /* nothing left over from a stopped run */
     psp_dispatch(addr);
     psp_cpu.frame = f.prev;
     psp_cpu.unwind = 0;              /* no unwind crosses a host frame */
@@ -232,7 +247,7 @@ void psp_call_from_host(uint32_t addr) {
 CALL_FRAME_NOINLINE void psp_call_guest_fn(psp_fn_t fn, uint32_t return_site) {
     psp_frame f = { return_site, psp_cpu.frame };
     psp_cpu.frame = &f;
-    fn();
+    psp_run(fn);                     /* fn and any tail chain it leaves */
     psp_cpu.frame = f.prev;
     if (psp_cpu.unwind == return_site) psp_cpu.unwind = 0;
 }
@@ -253,7 +268,7 @@ int psp_ra_is_jump(uint32_t ra) {
     return 1;
 }
 
-void psp_dispatch(uint32_t addr) {
+static psp_fn_t dispatch_lookup(uint32_t addr) {
     if (g_budget && ++g_calls >= g_budget) {
         g_budget = 0;                 /* fire once */
         if (g_over) g_over();
@@ -270,8 +285,7 @@ void psp_dispatch(uint32_t addr) {
             fprintf(stderr, "indirect ok: target=0x%08X from fn 0x%08X\n",
                     addr, psp_trace_last());
         }
-        fn();
-        return;
+        return fn;
     }
 
     g_misses++;
@@ -280,6 +294,16 @@ void psp_dispatch(uint32_t addr) {
      * to debug than one that stops and names the address. A host that wants to
      * survive misses during bring-up installs its own handler. */
     (g_miss ? g_miss : default_miss)(addr);
+    return NULL;
+}
+
+void psp_dispatch(uint32_t addr) {
+    psp_fn_t fn = dispatch_lookup(addr);
+    if (fn) psp_run(fn);
+}
+
+void psp_dispatch_tail(uint32_t addr) {
+    psp_next = dispatch_lookup(addr);
 }
 
 uint32_t psp_dispatch_count(void)  { return g_count; }

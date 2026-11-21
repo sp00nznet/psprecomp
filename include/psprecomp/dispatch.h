@@ -62,6 +62,43 @@ void psp_call_guest_addr(uint32_t addr, uint32_t return_site);
  *    continuation: returns 1, and the caller dispatches to `ra`. */
 int psp_ra_is_jump(uint32_t ra);
 
+/* ---- trampoline ------------------------------------------------------------
+ * Code emitted with `allegrexrecomp emit --trampoline` does not call the target
+ * of a transfer that ends a body (a fall-out into the next function, a `j` to
+ * another function, an indirect `jr`). It stores the target in psp_next and
+ * returns (PSP_TAIL), and psp_run() calls it. Chains of such transfers then
+ * take one host frame however long they run, whatever the C compiler does
+ * with tail calls; the host stack grows only with guest calls, whose
+ * helpers (psp_call_guest_fn, psp_dispatch) run the callee through psp_run().
+ *
+ * psp_next is per host thread. A guest thread switch happens only inside an
+ * HLE call, never between storing psp_next and returning to psp_run().
+ *
+ * Code emitted without the option never sets psp_next, so for it psp_run(fn)
+ * is just fn(). */
+#ifndef PSP_THREAD_LOCAL
+#  if defined(__cplusplus)
+#    define PSP_THREAD_LOCAL thread_local
+#  elif defined(_MSC_VER)
+#    define PSP_THREAD_LOCAL __declspec(thread)
+#  elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#    define PSP_THREAD_LOCAL _Thread_local
+#  else
+#    define PSP_THREAD_LOCAL __thread
+#  endif
+#endif
+extern PSP_THREAD_LOCAL psp_fn_t psp_next;
+
+/* Call fn, then whatever chain it leaves in psp_next. Stops when the chain
+ * ends (a return) or a guest unwind is under way (psp_cpu.unwind; see
+ * psp_ra_is_jump), leaving psp_next empty either way. */
+void psp_run(psp_fn_t fn);
+
+/* The tail form of psp_dispatch: looks addr up and leaves it in psp_next for
+ * the enclosing psp_run instead of calling it. A miss is reported as in
+ * psp_dispatch. */
+void psp_dispatch_tail(uint32_t addr);
+
 /* Called when psp_dispatch hits an unregistered address. The default prints
  * the address and aborts; a host can override it to log and continue, which is
  * useful while discovery is still incomplete. */

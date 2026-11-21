@@ -610,6 +610,7 @@ static const uint32_t LIKELY_CODE[] = {
 };
 
 static uint8_t synth[sizeof LIKELY_CODE * 4];
+static int synth_trampoline;   /* emit_synthetic passes it as --trampoline */
 
 /* Discover from `seeds` and emit, returning the generated .c (caller frees). */
 static char *emit_synthetic(const char *prefix, const uint32_t *words, size_t nwords,
@@ -636,12 +637,14 @@ static char *emit_synthetic(const char *prefix, const uint32_t *words, size_t nw
     if (nfuncs_out) *nfuncs_out = an.nfuncs;
 
     emit_opts o;
+    memset(&o, 0, sizeof o);
     o.outdir = ".";
     o.prefix = prefix;
     o.module = "synthetic";
     o.imports = NULL;
     o.nimports = 0;
     o.hints = NULL;
+    o.trampoline = synth_trampoline;
     int rc = a_emit(&an, &o);
     a_analysis_free(&an);
     if (rc != 0) {
@@ -1058,6 +1061,73 @@ static void check_loop_hook(void) {
     }
 }
 
+/* ---- --trampoline ---------------------------------------------------------
+ *
+ * With the option, a transfer that ends a body hands its target to psp_run()
+ * through psp_next instead of calling it, and a call goes through psp_run().
+ * The same fixtures as above; without the option they must come out as before
+ * (the checks above run with it off). */
+static void check_trampoline(void) {
+    synth_trampoline = 1;
+    {
+        uint32_t seeds[2] = { BASE, BASE + 8u };
+        char *src = emit_synthetic("tt_gap", GAP_CODE, 6, seeds, 2, NULL);
+        if (src) {
+            expect_contains(src, "PSP_TAIL(psp_func_08804008);",
+                            "a fall-out into another function hands over its target");
+            expect_absent(src, "psp_func_08804008();", "the fall-out does not call");
+            free(src);
+        }
+        char *h = emit_case_header("tt_gap");
+        if (h) {
+            expect_contains(h, "#define PSP_TAIL(fn) { psp_next = (fn); return; }",
+                            "the header defines PSP_TAIL");
+            free(h);
+        }
+    }
+    {
+        uint32_t seeds[2] = { BASE, BASE + 0x10u };
+        char *src = emit_synthetic("tt_jump", JUMP_CODE, 6, seeds, 2, NULL);
+        if (src) {
+            expect_contains(src, "PSP_TAIL(psp_func_08804010);",
+                            "a `j` to a function entry hands over its target");
+            expect_absent(src, "psp_func_08804010();", "the `j` does not call");
+            free(src);
+        }
+    }
+    {
+        uint32_t seeds[2] = { BASE, BASE + 0x20u };
+        char *src = emit_synthetic("tt_likely", LIKELY_CODE, 10, seeds, 2, NULL);
+        if (src) {
+            expect_contains(src, "PSP_TAIL(psp_func_08804020);",
+                            "the taken path of a likely branch hands over its target");
+            expect_absent(src, "psp_func_08804020();", "the likely branch does not call");
+            free(src);
+        }
+    }
+    {
+        uint32_t seed = BASE;
+        char *src = emit_synthetic("tt_jr", JR_SLOT_WRITES_TARGET, 2, &seed, 1, NULL);
+        if (src) {
+            expect_contains(src, "psp_dispatch_tail(_t);", "an indirect jump hands over its target");
+            expect_absent(src, "psp_dispatch(_t);", "the indirect jump does not call");
+            free(src);
+        }
+    }
+    {
+        uint32_t seed = BASE;
+        char *src = emit_synthetic("tt_bal", BAL_CALL, 7, &seed, 1, NULL);
+        if (src) {
+            expect_contains(src, "psp_call_guest_fn(psp_func_08804014, 0x08804008u);",
+                            "a call goes through the guest call helper, which runs its chain");
+            expect_order(src, "PSP_CALL_END(0x08804008u);", "      } }", "r_v0 = r_zero + 1;",
+                         "the code after the call still follows it");
+            free(src);
+        }
+    }
+    synth_trampoline = 0;
+}
+
 int main(void) {
     uint8_t code[sizeof CODE];
     for (size_t i = 0; i < sizeof CODE / sizeof CODE[0]; i++) {
@@ -1083,6 +1153,7 @@ int main(void) {
           (unsigned long long)an.insns);
 
     emit_opts o;
+    memset(&o, 0, sizeof o);
     o.outdir = ".";
     o.prefix = "t_emit";
     o.module = "synthetic";
@@ -1298,6 +1369,7 @@ int main(void) {
     check_jump_runs_foreign_slot();
     check_jump_to_own_entry_is_a_loop();
     check_loop_hook();
+    check_trampoline();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
