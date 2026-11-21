@@ -42,6 +42,14 @@ void psp_dispatch(uint32_t addr);
  * is a return whatever $ra holds, and no unwind crosses it. */
 void psp_call_from_host(uint32_t addr);
 
+/* Guest calls own their return-site frame here, not in an emitted body.
+ * Keeping stack-local frame addresses out of bodies permits sibling-call
+ * optimization for terminal transfers between them. The caller sets guest
+ * link registers and propagates any nonzero unwind after this returns.
+ * Direct calls preserve their no-lookup behavior; fn must be non-NULL. */
+void psp_call_guest_fn(psp_fn_t fn, uint32_t return_site);
+void psp_call_guest_addr(uint32_t addr, uint32_t return_site);
+
 /* What a `jr $ra` to `ra` is. On the hardware it is just a jump; recompiled,
  * calls are C calls, so it is one of three things:
  *  - a return, when `ra` is the current call's return site (or the call was
