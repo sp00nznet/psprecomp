@@ -159,7 +159,7 @@ static void psp_body_0000E06C(uint32_t _entry) {
 
 ## Status
 
-**v0.5.0 — alpha.** See the [CHANGELOG](CHANGELOG.md).
+**v0.6.0 — alpha.** See the [CHANGELOG](CHANGELOG.md).
 
 **A retail PSP game recompiles to C that compiles, links, and executes.**
 It does not yet render. Being specific about which parts are real:
@@ -244,9 +244,11 @@ allegrexrecomp ls      <file.iso>                list a disc image
 allegrexrecomp extract <file.iso> <match> <dir>  pull files out of a disc image
 allegrexrecomp dis     <file> [addr] [count]     disassemble Allegrex code
 allegrexrecomp cover   <file>                    decode-coverage report
-allegrexrecomp funcs   <file> [--list]           function discovery report
-allegrexrecomp emit    <file> <outdir> [prefix]  generate C
+allegrexrecomp funcs   <file> [--list] [--base <addr>]   function discovery report
+allegrexrecomp emit    <file> <outdir> [prefix] [--base <addr>] [--hints <path>]
+                                                 generate C
 allegrexrecomp dump    <file> <addr>             print one function's C
+allegrexrecomp relocate <file> <base> <out>      write a PRX relocated to <base>
 allegrexrecomp decrypt <file> [--keys <path>]    peel a ~PSP module
 ```
 
@@ -296,7 +298,7 @@ emulator is a thing you *diff against*, never a thing you link. See
 
 ## Contributors
 
-psprecomp is built by more than one person: [@andyst-dev](https://github.com/andyst-dev) (#3–#5, #7–#11), [@Tzeentchnet](https://github.com/Tzeentchnet) (#12–#14, #17, #18) and [@Invictus-potens](https://github.com/Invictus-potens) (#2). See
+psprecomp is built by more than one person: [@andyst-dev](https://github.com/andyst-dev) (#3–#5, #7–#11, #28–#34), [@Tzeentchnet](https://github.com/Tzeentchnet) (#12–#14, #17, #18), [@nworkers](https://github.com/nworkers) (#35, #36, #38) and [@Invictus-potens](https://github.com/Invictus-potens) (#2). See
 **[CONTRIBUTORS.md](CONTRIBUTORS.md)** for who did what, in technical detail.
 Outside PRs are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how.
 

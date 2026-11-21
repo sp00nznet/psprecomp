@@ -5,11 +5,60 @@ release. Entries v0.1.0 through v0.3.0 were reconstructed from the commit
 history and are dated by when the work landed. No tags existed for them at
 the time, and none were added afterwards.
 
-### Unreleased
+### v0.6.0 — *"Open House"* (November 2026)
 
 *WTF goes from its title screen, through the Job Share menu, into a game of
 Lumberjack and its paycheck screen. A second microgame, Pendemonium, plays
-too: a lit 3D factory scene where you cap pens.*
+too: a lit 3D factory scene where you cap pens. Ten pull requests from two
+people: andy, still on LocoRoco, and a new contributor bringing DJMAX Portable
+up, who made long guest loops stop eating the host stack and let a PRX be
+lifted at the address it really loads at.*
+
+**From contributors**
+- **A `j` to an address its own body owns is a `goto`, even at a function
+  entry.** A loop whose back edge jumped to its own entry was a tail call
+  through the wrapper, and MSVC does not promise to make that a jump. On DJMAX
+  Portable a song's playback thread overflowed a 1 MiB stack after about 90
+  seconds; 472 bodies did this —
+  *[@nworkers](https://github.com/nworkers)* (#35)
+- **`--base <addr>` and `relocate`: lift a PRX where it loads.** Applies the
+  module's own relocations (`R_MIPS_32`, `R_MIPS_26`, `HI16`/`LO16` pairs) at
+  a chosen base, so a host can keep the real memory layout. Without `--base`
+  nothing changes. Pointer seeds now honour a relocation's segment indices.
+  The relocated DJMAX image matches an independent loader word for word —
+  *[@nworkers](https://github.com/nworkers)* (#36)
+- **`-DPSPRECOMP_LOOP_HOOK`: a safe point in every guest loop.** Every backward
+  branch can call `psp_loop_hook()`, where a host scheduler can preempt. Off by
+  default, and then the output is unchanged. On DJMAX the latest resume of the
+  sound thread went from 1000 ms to 6.7 ms —
+  *[@nworkers](https://github.com/nworkers)* (#38)
+- **A linking `jalr` at the end of a body carries on after its slot.** It was
+  treated as terminal, so a callee's normal return skipped the caller's
+  epilogue and left `$sp` 16 bytes low —
+  *[@andyst-dev](https://github.com/andyst-dev)* (#31)
+- **Guest call frames live in the runtime, not in emitted bodies.**
+  `psp_call_guest_fn`/`psp_call_guest_addr` own the return-site frame, so a
+  body that calls and then transfers in tail position no longer keeps a host
+  frame per iteration (959,952 bytes over 20,000 iterations before). Re-emit
+  to pick it up —
+  *[@andyst-dev](https://github.com/andyst-dev)* (#32)
+- **`emit --hints <path>`: force labels for computed jumps.** A per-title TOML
+  file whose `[[label]]` addresses become entries of the body that owns them.
+  The first kind of hint; see [HINTS.md](docs/HINTS.md). Partly answers #15 —
+  *[@andyst-dev](https://github.com/andyst-dev)* (#34)
+- **`sceIoGetstat` fills its buffer from the host file** (type, mode, 64-bit
+  size, timestamps). It used to return success and write nothing —
+  *[@andyst-dev](https://github.com/andyst-dev)* (#29)
+- **`sceIoOpen` rejects a null or empty filename** instead of opening the
+  disc directory, or reading a module at address 0 as a name —
+  *[@andyst-dev](https://github.com/andyst-dev)* (#28)
+- **`sceCtrlReadLatch`/`sceCtrlPeekLatch`**: make, break, press and release
+  masks accumulated across samples, consumed on read —
+  *[@andyst-dev](https://github.com/andyst-dev)* (#30)
+- **Several watch sites at once.** `psp_trace_watch_add` and
+  `psp_trace_watch_label_add` take up to eight each and say when the table is
+  full, so an unwatched address can't pass for an unreached one —
+  *[@andyst-dev](https://github.com/andyst-dev)* (#33)
 
 **Emitter**
 - **A jump that leaves runs its delay slot even when another body owns it.**
@@ -145,6 +194,10 @@ too: a lit 3D factory scene where you cap pens.*
 - **`sceAudioOutputBlocking`/`sceAudioOutputPannedBlocking` block** for one
   buffer's play time, through a new `psp_threadman_delay()`. Returning at once
   let a mixer thread spin and starve every other thread under real threads.
+
+**Known open**
+- `emit --trampoline` (#37) waits on a rebase over #32's call helpers.
+- Jump-table operands traced to their definitions (#19) is in review.
 
 ### v0.5.0 — *"Taking Turns"* (October 2026)
 

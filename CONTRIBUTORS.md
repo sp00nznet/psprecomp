@@ -80,6 +80,44 @@ Landed in **v0.5.0 "Taking Turns"**:
   they ran found three lifecycle and masking defects, and each now has a test
   that failed before the fix.
 
+Landed in **v0.6.0 "Open House"**:
+- **Linking `jalr` continues after its slot (#31).** A linking indirect call at
+  the end of a body was classed as terminal, so the caller's epilogue never ran
+  and `$sp` came back 16 bytes low. The test covers both ownership layouts and
+  checks that `jalr $zero` stays terminal.
+- **Guest call frames moved into the runtime (#32).** A body-local
+  `psp_frame` published through `psp_cpu.frame` stopped the compiler reusing the
+  stack for the body's final transfer. They reduced it to a two-body loop that
+  grew 959,952 bytes over 20,000 iterations, and moved the frame into two
+  non-inlined helpers. Checked with ThinLTO as well.
+- **Per-title hints, starting with `[[label]]` (#34).** The answer to #15: a
+  small hand-written TOML reader, scoped to the one table asked for, laid out so
+  later kinds can sit beside it. Documented in HINTS.md.
+- **`sceIoGetstat` (#29)**, writing the 88-byte guest layout field by field,
+  and saying plainly which fields are and aren't faithful.
+- **Null and empty filenames rejected (#28)** before any host I/O.
+- **`sceCtrlReadLatch`/`sceCtrlPeekLatch` (#30)**, thread-safe against the
+  window's input thread without a new dependency.
+- **Several trace watches at once (#33).** A full table returns -1, so an
+  unwatched site cannot be mistaken for an unreached one.
+
+### nworkers — [@nworkers](https://github.com/nworkers)
+Brought DJMAX Portable (ULKS-46050) up in [reDMP1](https://github.com/reexec/reDMP1)
+and sent back what it took. Each PR is opt-in or narrowly scoped, says exactly
+what changes in emitted code, and is measured on the game. Landed in
+**v0.6.0 "Open House"**:
+- **A `j` to its own body is a `goto` (#35).** A minidump of a stack overflow
+  90 seconds into a song showed two bodies alternating; 472 bodies tail-called
+  their own entry. Now 0, and a song plays to the end.
+- **Relocating a PRX to a chosen base (#36).** `--base` and `relocate`, with
+  HI16/LO16 pairing and carry, and a fix for pointer seeds that assumed every
+  relocation was in segment 0. They flagged the 217 extra entries `--base`
+  finds outside `.text` as data, not recovered code, rather than claiming them.
+- **An opt-in loop hook (#38)** so a host scheduler can preempt inside a long
+  loop. The sound thread's worst resume went from 1000 ms to 6.7 ms.
+
+*In review:* #37, `emit --trampoline`.
+
 ### Invictus-potens — [@Invictus-potens](https://github.com/Invictus-potens)
 Brought up Monster Hunter Portable 3rd (NPJB40001). Landed in **v0.4.0
 "Handed Over"**:
@@ -110,7 +148,8 @@ on the old code, and names its sources. Landed in **v0.5.0 "Taking Turns"**:
 - Reported **#15** (forcing labels for computed jumps) and **#16** (`bgezal`
   to another function drops the code after the call).
 
-*In review:* #19, jump-table operands traced to their definitions.
+*In review:* #19, jump-table operands traced to their definitions. #15 is
+partly answered by andy's hints file (#34).
 
 ---
 
