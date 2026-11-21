@@ -951,6 +951,55 @@ static void check_link_branch_is_a_call(void) {
  * `jr $ra` was emitted without it, so every call leaked the 16-byte frame. */
 static const uint32_t JR_FOREIGN_SLOT[] = { 0x27BDFFF0u, 0x03E00008u, 0x27BD0010u };
 
+/* ---- a loop whose back edge is a `j` to the function's own entry -----------
+ *
+ * The target is a function entry, but it is this body's own: the jump is the
+ * loop's back edge, not a hand-over to another function. Lifted as a tail call
+ * (`psp_func_08804000(); return;`) it only stays flat if the compiler turns the
+ * call into a jump, which MSVC does not guarantee through the psp_func_ ->
+ * psp_body_ wrapper, so every iteration grows the host stack. Measured on DJMAX
+ * Portable (ULKS46050): a loop of this shape next to the score playback thread
+ * overflowed a 1 MiB thread stack about 90 seconds into a song; 472 such back
+ * edges in 461 functions.
+ *
+ *   08804000  addiu $a0,$a0,-1
+ *   08804004  beq   $a0,$zero,08804014
+ *   08804008  nop
+ *   0880400C  j     08804000           <- back edge to the body's own entry
+ *   08804010  nop
+ *   08804014  jr    $ra
+ *   08804018  nop
+ */
+static const uint32_t J_OWN_ENTRY_LOOP[] = {
+    0x2484FFFFu,   /* 08804000  addiu $a0,$a0,-1          */
+    0x10800003u,   /* 08804004  beq   $a0,$zero,08804014  */
+    0x00000000u,   /* 08804008  nop                       */
+    0x0A201000u,   /* 0880400C  j     08804000            */
+    0x00000000u,   /* 08804010  nop                       */
+    0x03E00008u,   /* 08804014  jr    $ra                 */
+    0x00000000u,   /* 08804018  nop                       */
+};
+
+static void check_jump_to_own_entry_is_a_loop(void) {
+    uint32_t seed = BASE;
+    int n = 0;
+    char *src = emit_synthetic("t_j_own_entry", J_OWN_ENTRY_LOOP, 7, &seed, 1, &n);
+    CHECK(n == 1, "the loop is one function, got %d", n);
+    if (!src) return;
+    expect_contains(src, "L_08804000:",
+                    "the body's own entry carries a label");
+    /* "goto L_08804000;" alone also matches the entry switch; the back edge
+     * is the goto right after the loop marker. No newline in the needle:
+     * output written on Windows is CRLF. */
+    const char *loop = strstr(src, "PSP_LOOP(0x08804000u);");
+    const char *back = loop ? strstr(loop, "goto L_08804000;") : NULL;
+    CHECK(loop && back && back - loop < 40,
+          "a `j` to the body's own entry is a loop back edge: a goto");
+    expect_absent(src, "psp_func_08804000();",
+                  "and not a call to itself");
+    free(src);
+}
+
 static void check_jump_runs_foreign_slot(void) {
     const uint32_t seeds[2] = { BASE, BASE + 8 };
     char *src = emit_synthetic("t_fslot", JR_FOREIGN_SLOT, 3, seeds, 2, NULL);
@@ -1194,6 +1243,7 @@ int main(void) {
     check_jr_ra_continuation();
     check_link_branch_is_a_call();
     check_jump_runs_foreign_slot();
+    check_jump_to_own_entry_is_a_loop();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
