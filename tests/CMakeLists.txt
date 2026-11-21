@@ -6,6 +6,10 @@ add_executable(test_decode test_decode.c)
 target_link_libraries(test_decode PRIVATE allegrex_core)
 add_test(NAME decode COMMAND test_decode)
 
+add_executable(test_dispatch test_dispatch.c)
+target_link_libraries(test_dispatch PRIVATE psprecomp)
+add_test(NAME dispatch COMMAND test_dispatch)
+
 add_executable(test_runtime test_runtime.c)
 target_link_libraries(test_runtime PRIVATE psprecomp)
 add_test(NAME runtime COMMAND test_runtime)
