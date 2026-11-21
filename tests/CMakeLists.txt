@@ -95,3 +95,8 @@ add_executable(test_ctrl_latch test_ctrl_latch.c)
 target_link_libraries(test_ctrl_latch PRIVATE psprecomp)
 add_test(NAME ctrl_latch COMMAND test_ctrl_latch)
 set_tests_properties(ctrl_latch PROPERTIES TIMEOUT 30)
+# The hints file: a TOML subset written by the game's author, and the entries it
+# forces into emission. Synthetic code only, like every other suite here.
+add_executable(test_hints test_hints.c)
+target_link_libraries(test_hints PRIVATE allegrex_core)
+add_test(NAME hints COMMAND test_hints)

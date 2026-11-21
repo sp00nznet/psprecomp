@@ -212,6 +212,7 @@ program, and both producing plausible values rather than visible failures:
 | **[Containers](docs/CONTAINERS.md)** | ISO9660 → PBP → `~PSP` → PRX, and how to identify each |
 | **[Decryption](docs/DECRYPT.md)** | KIRK, key tags, and supplying your own key material |
 | **[Recompiler](docs/RECOMPILER.md)** | Discovery, emission, delay slots, jump tables |
+| **[Hints](docs/HINTS.md)** | Per-title hints: the addresses the analysis cannot see, written down |
 | **[VFPU](docs/VFPU.md)** | Register aliasing, prefix instructions, matrix layout |
 | **[Oracle](docs/ORACLE.md)** | How emulators are used as references without being linked |
 | **[Changelog](CHANGELOG.md)** | What landed in each version, and who it came from |
