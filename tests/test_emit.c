@@ -268,6 +268,54 @@ static void check_fall_out(void) {
     }
 }
 
+/* A linking indirect transfer returns after its slot, including when that
+ * address is another body's entry or an interior ownership gap. A plain jr
+ * does not. Keep the check inside the source body so a later call cannot
+ * satisfy it. Ownership is hand-built to avoid discovery-order dependence. */
+static void check_jalr_body_continuation(void) {
+    for (int gap = 0; gap != 2; gap++) {
+        for (int transfer = 0; transfer != 3; transfer++) {
+            uint32_t code[] = {
+                0x03200008u, 0x24E70001u, /* jr/jalr t9; addiu a3,a3,1 */
+                0x24C60001u, 0x03E00008u, 0,
+                0x03E00008u, 0,
+            };
+            if (transfer == 1) code[0] = 0x0320F809u; /* jalr ra,t9 */
+            if (transfer == 2) code[0] = 0x03200009u; /* jalr zero,t9 */
+            uint32_t owners[] = { BASE, BASE, BASE + 8u, BASE + 8u,
+                                  BASE + 8u, BASE, BASE };
+            if (!gap) owners[5] = owners[6] = A_NO_OWNER;
+            a_func funcs[2];
+            memset(funcs, 0, sizeof funcs);
+            funcs[0].addr = funcs[0].start = BASE;
+            funcs[0].end = BASE + (gap ? 28u : 8u);
+            funcs[0].insns = gap ? 4 : 2;
+            funcs[1].addr = funcs[1].start = BASE + 8u;
+            funcs[1].end = BASE + 20u;
+            funcs[1].insns = 3;
+            funcs[1].has_return = 1;
+            a_analysis an;
+            hand_built(&an, owners, 7, funcs, 2, code);
+            char prefix[64];
+            snprintf(prefix, sizeof prefix, "t_indirect_cont_%d_%d", gap, transfer);
+            char *src = emit_case(&an, prefix);
+            CHECK(src != NULL, "%s: generated unit is readable", prefix);
+            if (src) {
+                char *body = strstr(src, "static void psp_body_08804000(");
+                char *end = body ? strstr(body, "void psp_func_08804000(void)") : NULL;
+                char *next = body ? strstr(body, "psp_func_08804008();") : NULL;
+                CHECK(body && end, "%s: source body is bounded", prefix);
+                CHECK(transfer == 1 ? (next && end && next < end) : (!next || (end && next > end)),
+                      "%s: only a linking jalr continues after its slot", prefix);
+                if (end) *end = '\0';
+                CHECK(body && count_of(body, "r_a3 = r_a3 + 1;") == 1,
+                      "%s: the owned delay slot is emitted once", prefix);
+                free(src);
+            }
+        }
+    }
+}
+
 static void check_slot_of_another_body(void) {
     /* Case one: a conditional branch whose delay slot is another body's first
      * instruction. On the previous behaviour this body ended in a silent
@@ -1110,6 +1158,7 @@ int main(void) {
     }
 
     check_fall_out();
+    check_jalr_body_continuation();
     check_slot_of_another_body();
     check_taken_path_runs_the_slot();
     check_terminal_transfer_stays_tail();
