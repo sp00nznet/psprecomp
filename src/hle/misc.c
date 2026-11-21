@@ -13,6 +13,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <limits.h>
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#else
+#  include <stdatomic.h>
+#endif
 
 /* ---- Kernel_Library ------------------------------------------------------
  * Interrupt masking. The mask belongs to the *thread* that opened the critical
@@ -123,25 +130,85 @@ static void hle_ModuleOk(void)             { psp_ret(SCE_KERNEL_ERROR_OK); }
 static uint32_t g_buttons;
 static uint8_t  g_analog_x = 128, g_analog_y = 128;
 static uint32_t g_ctrl_frame;
+static uint32_t g_latch[4];  /* PSPSDK SceCtrlLatch: make, break, press, release */
+static uint32_t g_latch_samples;
+
+/* The window submits samples on a host thread, independently of the guest.
+ * Keep sampling and latch consumption atomic, including in inline mode. */
+#ifdef _WIN32
+static SRWLOCK g_ctrl_lock = SRWLOCK_INIT;
+static void ctrl_lock(void) { AcquireSRWLockExclusive(&g_ctrl_lock); }
+static void ctrl_unlock(void) { ReleaseSRWLockExclusive(&g_ctrl_lock); }
+#else
+static atomic_flag g_ctrl_lock = ATOMIC_FLAG_INIT;
+static void ctrl_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_ctrl_lock, memory_order_acquire)) {}
+}
+static void ctrl_unlock(void) {
+    atomic_flag_clear_explicit(&g_ctrl_lock, memory_order_release);
+}
+#endif
+
+static void ctrl_sample(uint32_t buttons) {
+    g_latch[0] |= buttons & ~g_buttons;
+    g_latch[1] |= g_buttons & ~buttons;
+    g_latch[2] |= buttons;
+    g_latch[3] |= ~buttons;
+    if (g_latch_samples < INT_MAX) g_latch_samples++;
+    g_buttons = buttons;
+}
 
 void psp_ctrl_set(uint32_t buttons, uint8_t ax, uint8_t ay) {
-    g_buttons = buttons;
+    ctrl_lock();
+    ctrl_sample(buttons);
     g_analog_x = ax;
     g_analog_y = ay;
+    ctrl_unlock();
 }
 
 static void hle_CtrlSet(void) { psp_ret(SCE_KERNEL_ERROR_OK); }
+
+static void ctrl_latch(int consume) {
+    uint32_t out = psp_arg(0), data[4], samples;
+    if (!out || !psp_mem_ptr(out, 16)) { psp_ret(0x80010016u); return; }
+    ctrl_lock();
+    if (consume && !g_latch_samples) {
+        /* PSPSDK documents an empty read as blocking until the next sample.
+         * Use the existing frame wait rather than inventing a polling thread.
+         * A host sample arriving during the wait takes precedence. */
+        ctrl_unlock();
+        psp_threadman_frame_wait();
+        ctrl_lock();
+        if (!g_latch_samples) ctrl_sample(g_buttons);
+    }
+    samples = g_latch_samples;
+    memcpy(data, g_latch, sizeof data);
+    if (consume) {
+        memset(g_latch, 0, sizeof g_latch);
+        g_latch_samples = 0;
+    }
+    ctrl_unlock();
+    for (unsigned i = 0; i < 4; i++) psp_write32(out + i * 4, data[i]);
+    psp_ret(samples);
+}
+static void hle_ReadLatch(void) { ctrl_latch(1); }
+static void hle_PeekLatch(void) { ctrl_latch(0); }
 
 /* SceCtrlData: u32 timestamp, u32 buttons, u8 lx, u8 ly, then padding to 16. */
 static void hle_ReadBufferPositive(void) {
     uint32_t buf = psp_arg(0), count = psp_arg(1);
     if (!count) count = 1;
+    ctrl_lock();
+    uint32_t frame = g_ctrl_frame, buttons = g_buttons;
+    uint8_t ax = g_analog_x, ay = g_analog_y;
+    g_ctrl_frame += count;
+    ctrl_unlock();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t at = buf + i * 16;
-        psp_write32(at, g_ctrl_frame++);
-        psp_write32(at + 4, g_buttons);
-        psp_write8(at + 8, g_analog_x);
-        psp_write8(at + 9, g_analog_y);
+        psp_write32(at, frame + i);
+        psp_write32(at + 4, buttons);
+        psp_write8(at + 8, ax);
+        psp_write8(at + 9, ay);
         for (int k = 10; k < 16; k++) psp_write8(at + (uint32_t)k, 0);
     }
     psp_ret(count);
@@ -251,9 +318,13 @@ void psp_misc_reset(void) {
     /* The interrupt mask is per thread and lives in the scheduler; a reset
      * here cannot reach another thread's bracket, and should not. */
     g_exit_requested = 0;
+    ctrl_lock();
     g_buttons = 0;
     g_analog_x = g_analog_y = 128;
     g_ctrl_frame = 0;
+    memset(g_latch, 0, sizeof g_latch);
+    g_latch_samples = 0;
+    ctrl_unlock();
     memset(g_audio, 0, sizeof g_audio);
 #if PSPRECOMP_REAL_THREADS
     memset(g_audio_due_us, 0, sizeof g_audio_due_us);
@@ -300,6 +371,8 @@ void psp_misc_register(void) {
     psp_hle_register(0x1F4011E6, "sceCtrl", "sceCtrlSetSamplingMode",     hle_CtrlSet);
     psp_hle_register(0x6A2774F3, "sceCtrl", "sceCtrlSetSamplingCycle",    hle_CtrlSet);
     psp_hle_register(0x1F803938, "sceCtrl", "sceCtrlReadBufferPositive",  hle_ReadBufferPositive);
+    psp_hle_register(0x0B588501, "sceCtrl", "sceCtrlReadLatch",           hle_ReadLatch);
+    psp_hle_register(0xB1D0E5CD, "sceCtrl", "sceCtrlPeekLatch",           hle_PeekLatch);
 
     psp_hle_register(0x5EC81C55, "sceAudio", "sceAudioChReserve",            hle_ChReserve);
     psp_hle_register(0x6FC46853, "sceAudio", "sceAudioChRelease",            hle_ChRelease);

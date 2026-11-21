@@ -169,6 +169,10 @@ void psp_misc_init(void);
 void psp_misc_register(void);
 void psp_misc_reset(void);
 int  psp_exit_requested(void);
+/* Submit one controller sample, even when the buttons have not changed.
+ * The window calls this once per input poll. Samples accumulate until ReadLatch;
+ * PeekLatch observes them without consuming. No hardware sampling timer is
+ * emulated; an empty ReadLatch waits a frame then samples the current input. */
 void psp_ctrl_set(uint32_t buttons, uint8_t ax, uint8_t ay);
 uint64_t psp_audio_blocks(void);
 
