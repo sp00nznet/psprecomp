@@ -1014,6 +1014,50 @@ static void check_jump_runs_foreign_slot(void) {
     }
 }
 
+/* ---- a safe point in every guest loop -------------------------------------
+ *
+ * A recompiled body is plain C, so nothing can interrupt it between calls into
+ * the runtime: a long guest loop with no HLE call in it holds the CPU even when
+ * a higher-priority thread's timer has expired, which the PSP would preempt at
+ * once. Every backward branch already carries PSP_LOOP(target); with
+ * -DPSPRECOMP_LOOP_HOOK the header routes it to psp_loop_hook(), a function the
+ * runtime defines, and without it the header leaves PSP_LOOP as it was.
+ */
+static const uint32_t COUNT_DOWN[] = {
+    0x2442FFFFu,   /* 08804000  addiu $v0,$v0,-1 */
+    0x1440FFFEu,   /* 08804004  bnez  $v0,0x08804000 -- backward */
+    0x00000000u,   /* 08804008  nop */
+    0x03E00008u,   /* 0880400C  jr    $ra */
+    0x00000000u,   /* 08804010  nop */
+};
+
+static void check_loop_hook(void) {
+    const uint32_t seed = BASE;
+    char *src = emit_synthetic("t_loop", COUNT_DOWN, 5, &seed, 1, NULL);
+    if (src) {
+        expect_contains(src, "PSP_LOOP(0x08804000u);",
+                        "a backward branch carries PSP_LOOP with its target");
+        free(src);
+    }
+    char *hdr = emit_case_header("t_loop");
+    CHECK(hdr != NULL, "loop hook: generated header is readable");
+    if (hdr) {
+        expect_contains(hdr, "#ifdef PSPRECOMP_LOOP_HOOK",
+                        "the hook is opt-in");
+        expect_contains(hdr, "void psp_loop_hook(uint32_t addr);",
+                        "the hook is declared for the runtime to define");
+        expect_contains(hdr, "#    define PSP_LOOP(a) psp_loop_hook(a)",
+                        "with the hook on, PSP_LOOP calls it");
+        expect_contains(hdr, "#    define PSP_LOOP(a) do { psp_trace_loop(a); psp_loop_hook(a); } while (0)",
+                        "a trace build keeps its loop record and calls the hook too");
+        const char *plain = strstr(hdr, "#  define PSP_LOOP(a)  ((void)0)");
+        const char *hook = strstr(hdr, "#ifdef PSPRECOMP_LOOP_HOOK");
+        CHECK(plain && hook && plain < hook,
+              "the default definition stays, and the hook block overrides it only when enabled");
+        free(hdr);
+    }
+}
+
 int main(void) {
     uint8_t code[sizeof CODE];
     for (size_t i = 0; i < sizeof CODE / sizeof CODE[0]; i++) {
@@ -1253,6 +1297,7 @@ int main(void) {
     check_link_branch_is_a_call();
     check_jump_runs_foreign_slot();
     check_jump_to_own_entry_is_a_loop();
+    check_loop_hook();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
