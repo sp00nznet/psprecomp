@@ -164,6 +164,61 @@ static void test_arithmetic(void) {
 /* Prefixes rewrite operands rather than trapping. Each case is a form WTF
  * uses: a broadcast before a clamp, constants and negation building box
  * corners, and saturate/mask on the destination. */
+/* vcmovt / vcmovf. The interesting case is cc_sel 6: each lane tests its own
+ * condition bit, which is how a vcmp result becomes a per-lane select. */
+static void test_condmove(void) {
+    int d[4], s[4];
+    psp_vfpu_regs(0x00, 4, d);
+    psp_vfpu_regs(0x04, 4, s);
+
+    /* Scalar condition: cc_sel 0 tests bit 0 for every lane. */
+    for (int pass = 0; pass < 2; pass++) {
+        const int cc_set = pass == 0;
+        for (int i = 0; i < 4; i++) {
+            psp_cpu.v[d[i]] = 1.0f + (float)i;
+            psp_cpu.v[s[i]] = 10.0f + (float)i;
+        }
+        psp_cpu.vfpu_cc = cc_set ? 1u : 0u;
+        psp_vcmov(0x00, 0x04, 4, 0, 1);                 /* vcmovt */
+        for (int i = 0; i < 4; i++)
+            CHECK_F(psp_cpu.v[d[i]], cc_set ? 10.0f + (float)i : 1.0f + (float)i,
+                    cc_set ? "vcmovt cc set" : "vcmovt cc clear");
+
+        for (int i = 0; i < 4; i++) {
+            psp_cpu.v[d[i]] = 1.0f + (float)i;
+            psp_cpu.v[s[i]] = 10.0f + (float)i;
+        }
+        psp_cpu.vfpu_cc = cc_set ? 1u : 0u;
+        psp_vcmov(0x00, 0x04, 4, 0, 0);                 /* vcmovf */
+        for (int i = 0; i < 4; i++)
+            CHECK_F(psp_cpu.v[d[i]], cc_set ? 1.0f + (float)i : 10.0f + (float)i,
+                    cc_set ? "vcmovf cc set" : "vcmovf cc clear");
+    }
+
+    /* Per-lane condition: lanes 0 and 2 move, lanes 1 and 3 keep. */
+    for (int i = 0; i < 4; i++) {
+        psp_cpu.v[d[i]] = 1.0f + (float)i;
+        psp_cpu.v[s[i]] = 10.0f + (float)i;
+    }
+    psp_cpu.vfpu_cc = 0x5u;                             /* bits 0 and 2 */
+    psp_vcmov(0x00, 0x04, 4, 6, 1);
+    CHECK_F(psp_cpu.v[d[0]], 10.0f, "vcmovt lane 0 follows its own bit");
+    CHECK_F(psp_cpu.v[d[1]], 2.0f,  "vcmovt lane 1 keeps rd");
+    CHECK_F(psp_cpu.v[d[2]], 12.0f, "vcmovt lane 2 follows its own bit");
+    CHECK_F(psp_cpu.v[d[3]], 4.0f,  "vcmovt lane 3 keeps rd");
+
+    /* Width: .p moves two lanes only. */
+    for (int i = 0; i < 4; i++) {
+        psp_cpu.v[d[i]] = 1.0f + (float)i;
+        psp_cpu.v[s[i]] = 10.0f + (float)i;
+    }
+    psp_cpu.vfpu_cc = 1u;
+    psp_vcmov(0x00, 0x04, 2, 0, 1);
+    CHECK_F(psp_cpu.v[d[0]], 10.0f, "vcmovt.p lane 0");
+    CHECK_F(psp_cpu.v[d[1]], 11.0f, "vcmovt.p lane 1");
+    CHECK_F(psp_cpu.v[d[2]], 3.0f,  "vcmovt.p leaves lane 2");
+}
+
 static void test_prefixes(void) {
     psp_vfpu_reset();
 
@@ -559,6 +614,7 @@ int main(void) {
     test_load_store();
     test_arithmetic();
     test_prefixes();
+    test_condmove();
     test_more_ops();
     test_compare();
     test_matrix_ops();

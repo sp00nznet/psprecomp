@@ -716,6 +716,28 @@ void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size) {
     end_op();
 }
 
+/* vcmovt / vcmovf -- move rs into rd, lane by lane, when the condition says so.
+ *
+ * The encoding is oooooooooooo c rrri sssssss j ddddddd: rcond at bit 19 picks
+ * true (0) or false (1), cc_sel at bits 18..16 picks which VFPU_CC bit is
+ * tested, and the two size bits are the usual non-adjacent pair. cc_sel 6 is
+ * the useful special case: each lane tests its own bit, which is how a vcmp
+ * result is turned into a per-lane select. 7 is unspecified, so it is treated
+ * as "bit 7", which reads as zero. */
+void psp_vcmov(uint32_t vd, uint32_t vs, int size, uint32_t cc_sel, int is_true) {
+    if (!take_prefixes(psp_cpu.pc, is_true ? "vcmovt" : "vcmovf")) return;
+    float s[4];
+    int d[4];
+    read_src(0, vs, size, s);
+    psp_vfpu_regs(vd, size, d);
+    for (int i = 0; i < size; i++) {
+        const int bit = (cc_sel == 6) ? i : (int)cc_sel;
+        const int cond = (int)((psp_cpu.vfpu_cc >> bit) & 1u);
+        if (is_true ? cond : !cond) psp_cpu.v[d[i]] = s[i];
+    }
+    end_op();
+}
+
 /* viim / vfim -- write a single lane from an immediate encoded in the
  * instruction. No prefixes apply: there is no source operand to rewrite. */
 void psp_vimm(uint32_t vd, float value) {

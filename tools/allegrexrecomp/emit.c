@@ -427,6 +427,14 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         fprintf(f, "%spsp_vdot(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VSCL:
         fprintf(f, "%spsp_vscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+    case A_VCMOV: {
+        /* rcond is bit 19 (0 = vcmovt), cc_sel is bits 18..16. */
+        const uint32_t cc_sel = (in->raw >> 16) & 7u;
+        const int is_true = ((in->raw >> 19) & 1u) == 0;
+        fprintf(f, "%spsp_vcmov(%u, %u, %u, %u, %d);\n",
+                ind, in->vd, in->vs, in->vsize, cc_sel, is_true);
+        return;
+    }
     case A_VCMP:
         fprintf(f, "%spsp_vcmp(%u, %u, %u, %u);\n", ind, in->vd & 0xF, in->vs, in->vt, in->vsize); return;
     case A_VSGE: case A_VSLT: case A_VSCMP: case A_VHDP: case A_VCRS: case A_VCRSP: case A_VDET: {

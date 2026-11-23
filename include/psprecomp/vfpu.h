@@ -64,6 +64,10 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 /* Comparison, writing the VFPU condition codes. */
 void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size);
 
+/* Conditional move: rd = rs when the selected VFPU_CC bit matches. cc_sel 6
+ * means "each lane tests its own bit"; 7 is unspecified by the hardware. */
+void psp_vcmov(uint32_t vd, uint32_t vs, int size, uint32_t cc_sel, int is_true);
+
 /* Per-lane comparisons that produce numbers: 1.0 / 0.0, or -1, 0, 1. */
 void psp_vsge(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 void psp_vslt(uint32_t vd, uint32_t vs, uint32_t vt, int size);
