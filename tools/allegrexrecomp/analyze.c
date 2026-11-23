@@ -1,6 +1,7 @@
 /* Function discovery. See analyze.h. */
 
 #include "analyze.h"
+#include <stdlib.h>
 #include "decode.h"
 
 #include <stdio.h>
@@ -73,6 +74,11 @@ typedef struct {
     /* Branch targets already claimed by an earlier walk; promoted to entries
      * between rounds so they become reachable through dispatch. */
     u32list    *cross;
+    /* Parallel to `cross`: the address of the instruction that branches to it,
+     * so promotion can tell an intra-function jump from a genuine shared
+     * block. Fragmentation of one function into several bodies is what makes a
+     * fall-through run an epilogue it does not own. */
+    u32list    *cross_from;
 } walk_ctx;
 
 static int is_known_entry(const walk_ctx *c, uint32_t addr) {
@@ -219,6 +225,7 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                          * Promoting it to one makes it reachable. Over-split
                          * is the safe direction; unreachable is not. */
                         u32_push(c->cross, in.target);
+                        u32_push(c->cross_from, in.addr);
                     } else {
                         u32_push(&blocks, in.target);
                     }
@@ -265,8 +272,10 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
                          * The branch path above has always promoted these. The
                          * jump path did not, so a whole class of shared block
                          * stayed unreachable. */
-                        if ((c->seen[bi] & SEEN_CODE) && !c->entry_map[bi])
+                        if ((c->seen[bi] & SEEN_CODE) && !c->entry_map[bi]) {
                             u32_push(c->cross, in.target);
+                            u32_push(c->cross_from, in.addr);
+                        }
                         else
                             u32_push(&blocks, in.target);
                     } else {
@@ -484,8 +493,9 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     for (uint32_t i = 0; i < nwords; i++) owner[i] = A_NO_OWNER;
 
     u32list queue = { 0 }, imports = { 0 }, indirects = { 0 }, cross = { 0 };
+    u32list cross_from = { 0 };
     walk_ctx ctx = { an, seen, entry_map, owner, A_NO_OWNER,
-                     &queue, &imports, &indirects, &cross };
+                     &queue, &imports, &indirects, &cross, &cross_from };
 
     /* Pass 1: establish the complete set of function entries before walking
      * anything. Both the tail-call test and the ran-off-the-end test need to
@@ -600,8 +610,29 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
             int n = resolve_jump_table(an, indirects.v[i], &targets);
             if (n > 0) { an->ntables++; an->ntable_targets += n; }
         }
-        for (int i = 0; i < cross.n; i++) u32_push(&targets, cross.v[i]);
-        cross.n = 0;
+        /* A branch to an address inside the extent of the function that holds
+         * the branch is an intra-function jump, not a shared block. Promoting
+         * it splits one MIPS function into several C bodies, and the
+         * fall-through between them then runs the enclosing epilogue from the
+         * wrong frame -- measured as sp deltas of exactly one frame size on
+         * 0x5C37C -> 0x5C434 and 0x25C0C -> 0x25C2C. Keep those inside their
+         * owning body; it already supports multiple entry labels. */
+        for (int i = 0; i < cross.n; i++) {
+            uint32_t t = cross.v[i], from = (i < cross_from.n) ? cross_from.v[i] : 0;
+            int intra = 0;
+            if (from && a_in_range(an, from) && a_in_range(an, t)) {
+                uint32_t owner_of_from = owner[word_index(an, from)];
+                if (owner_of_from != A_NO_OWNER && t >= owner_of_from) {
+                    for (int k = 0; k < nfuncs; k++)
+                        if (funcs[k].addr == owner_of_from) {
+                            if (t < funcs[k].end) intra = 1;
+                            break;
+                        }
+                }
+            }
+            if (!intra || getenv("PSPRECOMP_NO_INTRA_MERGE")) u32_push(&targets, t);
+        }
+        cross.n = 0; cross_from.n = 0;
         indirects.n = 0;
         int added = 0;
         for (int i = 0; i < targets.n; i++) {
@@ -683,6 +714,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     an->nwords = nwords;
 
     free(cross.v);
+    free(cross_from.v);
     free(queue.v);
     free(seen);
     free(entry_map);
