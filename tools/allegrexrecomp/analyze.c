@@ -469,6 +469,39 @@ static int cmp_func(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 
+/* The function whose extent starts at `addr`, by binary search over the
+ * address-sorted table (`cmp_func`). */
+static const a_func *find_func(const a_func *funcs, int n, uint32_t addr) {
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (funcs[mid].addr == addr) return &funcs[mid];
+        if (funcs[mid].addr < addr) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return NULL;
+}
+
+/* A switch for the bisection work: unset, empty, "0" and "false" are off,
+ * anything else is on. Reading the value, not just the pointer, means a
+ * `PSPRECOMP_NO_INTRA_MERGE=0` shell exports the documented default. */
+static int env_flag(const char *name) {
+    const char *value = getenv(name);
+    if (!value || !*value) return 0;
+    if (value[0] == '0' && value[1] == '\0') return 0;
+    if (strlen(value) == 5) {
+        static const char off[] = "false";
+        int same = 1;
+        for (int i = 0; i < 5; i++) {
+            char c = value[i];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != off[i]) { same = 0; break; }
+        }
+        if (same) return 0;
+    }
+    return 1;
+}
+
 int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
     an->funcs = NULL; an->nfuncs = 0;
     an->imports = NULL; an->nimports = 0;
@@ -602,6 +635,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
  * which shows up as a dispatch miss at run time. The cap is a termination
  * guarantee, not an expected limit: entries only ever accumulate, so this
  * converges in a handful of rounds. */
+    const int no_intra_merge = env_flag("PSPRECOMP_NO_INTRA_MERGE");
     for (int round = 0; round < 8; round++) {
     if (round > 0) {
         if (!an->image && !cross.n && !indirects.n) break;
@@ -617,20 +651,21 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
          * wrong frame -- measured as sp deltas of exactly one frame size on
          * 0x5C37C -> 0x5C434 and 0x25C0C -> 0x25C2C. Keep those inside their
          * owning body; it already supports multiple entry labels. */
+        /* The previous round left a complete table. Sorting it once makes
+         * each owner lookup O(log n) instead of a scan of every function for
+         * every target, which mattered at ~59k functions. */
+        qsort(funcs, (size_t)nfuncs, sizeof *funcs, cmp_func);
         for (int i = 0; i < cross.n; i++) {
             uint32_t t = cross.v[i], from = (i < cross_from.n) ? cross_from.v[i] : 0;
             int intra = 0;
             if (from && a_in_range(an, from) && a_in_range(an, t)) {
                 uint32_t owner_of_from = owner[word_index(an, from)];
                 if (owner_of_from != A_NO_OWNER && t >= owner_of_from) {
-                    for (int k = 0; k < nfuncs; k++)
-                        if (funcs[k].addr == owner_of_from) {
-                            if (t < funcs[k].end) intra = 1;
-                            break;
-                        }
+                    const a_func *owner_func = find_func(funcs, nfuncs, owner_of_from);
+                    if (owner_func && t < owner_func->end) intra = 1;
                 }
             }
-            if (!intra || getenv("PSPRECOMP_NO_INTRA_MERGE")) u32_push(&targets, t);
+            if (!intra || no_intra_merge) u32_push(&targets, t);
         }
         cross.n = 0; cross_from.n = 0;
         indirects.n = 0;
