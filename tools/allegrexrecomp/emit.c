@@ -660,11 +660,36 @@ static void mark_labels(ectx *c, const a_func *fn) {
         if (in.is_jump && !in.is_indirect && in.has_target &&
             owned_by(an, in.target, owner))
             c->is_label[widx(an, in.target)] = 1;
-        if (in.has_delay_slot && owned_by(an, a + 4, owner))
+        /* Only a construct the emitter models inline runs its delay slot with
+         * it. An instruction that is itself a delay slot is emitted by
+         * emit_simple, which has no slot handling -- and a branch in a slot is
+         * exactly that: `bnel` there traps as unimplemented and its own slot
+         * was marked inline too, so the instruction at +8 was never emitted at
+         * all and a `goto` to it dangled. Leave such a slot to the main loop. */
+        if (in.has_delay_slot && owned_by(an, a + 4, owner) && !c->is_slot[widx(an, a)])
             c->is_slot[widx(an, a + 4)] = 1;
         /* A call's return site is a label, so that a `jr $ra` used as a jump
          * back to it has somewhere to land through dispatch; see jr $ra. */
         if (in.is_call && !in.is_get_pc && owned_by(an, a + 8, owner))
+            c->is_label[widx(an, a + 8)] = 1;
+    }
+
+    /* A slot that is also a label is emitted twice: inline with its branch and
+     * again under its own label. The alias copy has to jump past itself on the
+     * fall-through path (emit_slot_alias emits `goto L_{a+8}`), so the address
+     * after the slot needs a label of its own. That used to come for free
+     * because such an address was often promoted to an entry by discovery;
+     * once intra-function targets stopped being promoted, the goto dangled and
+     * the emitted C did not compile. Second pass because the slot's own label
+     * may be marked later in the first pass. */
+    for (uint32_t a = fn->start; a < fn->end; a += 4) {
+        if (!owned_by(an, a, owner)) continue;
+        a_insn in;
+        a_decode(fetch(an, a), a, &in);
+        /* fn->addr is marked as a label only after this function runs, but a
+         * slot that IS the entry is emitted as an alias like any other. */
+        int slot_is_label = c->is_label[widx(an, a + 4)] || (a + 4 == fn->addr);
+        if (in.has_delay_slot && owned_by(an, a + 8, owner) && slot_is_label)
             c->is_label[widx(an, a + 8)] = 1;
     }
 
@@ -738,6 +763,15 @@ static void emit_function(ectx *c, const a_func *fn) {
      * restores read `sp + offset`, so a shifted $sp reads a different slot and
      * loads a plausible wrong value rather than failing. Checking the
      * invariant directly is far cheaper than tracing the consequences. */
+    /* A body whose entry instruction is already the epilogue -- `jr $ra`
+     * followed by the frame adjustment -- is a shared tail reached by jump
+     * from the function that owns the frame, not a function of its own. It
+     * does not own a frame, so it can never satisfy "leave $sp as you found
+     * it": its pop is the caller's. Checking it reports every such fragment
+     * as a leak, with a delta exactly equal to the frame it pops -- measured
+     * on 0x664 (+32), 0x5B5C, 0x6614, 0x78C8C, 0x1ADC34 (+16) and 0x3A61C
+     * (+656), 24 of them on the LocoRoco boot path alone, which buried the
+     * real anomalies. */
     fprintf(f, "    PSP_SP_ENTER();\n");
 
     int nlabels = 0;
