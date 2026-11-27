@@ -161,12 +161,10 @@ static void test_arithmetic(void) {
     for (int i = 0; i < 4; i++) CHECK_F(out[i], a[i] + b[i], "vadd into its own source");
 }
 
-/* Prefixes rewrite operands rather than trapping. Each case is a form WTF
- * uses: a broadcast before a clamp, constants and negation building box
- * corners, and saturate/mask on the destination. */
 /* vcmovt / vcmovf. The interesting case is cc_sel 6: each lane tests its own
  * condition bit, which is how a vcmp result becomes a per-lane select. */
 static void test_condmove(void) {
+    psp_vfpu_reset();
     int d[4], s[4];
     psp_vfpu_regs(0x00, 4, d);
     psp_vfpu_regs(0x04, 4, s);
@@ -219,6 +217,9 @@ static void test_condmove(void) {
     CHECK_F(psp_cpu.v[d[2]], 3.0f,  "vcmovt.p leaves lane 2");
 }
 
+/* Prefixes rewrite operands rather than trapping. Each case is a form WTF
+ * uses: a broadcast before a clamp, constants and negation building box
+ * corners, and saturate/mask on the destination. */
 static void test_prefixes(void) {
     psp_vfpu_reset();
 
